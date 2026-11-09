@@ -23,7 +23,7 @@ BENCH_EVENTS ?= 8000
 
 .DEFAULT_GOAL := help
 .PHONY: help install install-dev test lint train train-upgraded train-ieee serve serve-prod \
-        simulate demo demo-retrain baseline-run calibrate benchmark download-data gen-data info report clean distclean
+        simulate demo demo-retrain baseline-run attack-eval calibrate benchmark download-data gen-data info report clean distclean
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*##"; printf "FinNet-GNN targets:\n\n"} \
@@ -78,6 +78,11 @@ baseline-run: ## Compare classical baselines and the GNN
 	$(FINNET) baseline-run --config $(CONFIG) --source synthetic \
 		--events $(EVENTS) --model artifacts/risk_gnn_v2.pt \
 		--json-out artifacts/baseline_report.json
+
+attack-eval: ## Evaluate evasive attack robustness
+	$(FINNET) attack-eval --config $(CONFIG) --source synthetic \
+		--events 1500 --model $(CHECKPOINT) \
+		--json-out artifacts/attack_report.json
 
 calibrate: ## Fit a JSON calibrator for a checkpoint
 	$(FINNET) calibrate --config $(CONFIG) --source synthetic \

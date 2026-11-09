@@ -14,6 +14,8 @@ model:
   risk_gate: false
   temporal_encoding: false
   time_dim: 16
+  temporal_memory: false
+  history_length: 8
   epochs: 12
   batch_size: 64
   learning_rate: 0.002
@@ -24,6 +26,8 @@ graph:
   max_tx_nodes: 50000
   snapshot_hops: 2
   max_snapshot_nodes: 128
+  approx_fanout: false
+  approx_fanout_precision: 8
 
 policy:
   allow_threshold: 0.40
@@ -47,5 +51,10 @@ data:
   synthetic_events: 12000
   max_events: 150000
   negative_ratio: 3.0
+  simulate_rejection: false
+  rejection_cutoff: 0.55
+  rejection_seed: 101
+  rejection_weight_cap: 20.0
+  rejection_propensity_floor: 0.05
   transactions_csv: data/train_transaction.csv
   identity_csv: data/train_identity.csv

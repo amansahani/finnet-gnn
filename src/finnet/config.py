@@ -47,6 +47,8 @@ class ModelConfig:
     risk_gate: bool = False
     temporal_encoding: bool = False
     time_dim: int = 16
+    temporal_memory: bool = False
+    history_length: int = 8
     learning_rate: float = 2e-3
     weight_decay: float = 1e-4
     batch_size: int = 64
@@ -66,6 +68,8 @@ class GraphConfig:
     snapshot_hops: int = 2
     max_snapshot_nodes: int = 128
     fanout_cap: int = 4_096
+    approx_fanout: bool = False
+    approx_fanout_precision: int = 8
     risk_ewma_alpha: float = 0.25
 
 
@@ -116,6 +120,14 @@ class DataConfig:
     max_test_samples: int = 5_000
     negative_ratio: float = 3.0
     pan_salt: str = "finnet-local-salt-change-me"
+    # Simulation-only controlled benchmark for reject inference. In production,
+    # propensities should come from logged legacy approval/decline probabilities.
+    simulate_rejection: bool = False
+    rejection_cutoff: float = 0.55
+    rejection_seed: int = 101
+    rejection_weight_cap: float = 20.0
+    rejection_propensity_floor: float = 0.05
+    attack_eval_max_events: int = 5_000
 
 
 @dataclass(frozen=True)

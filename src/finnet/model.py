@@ -7,6 +7,7 @@ from torch import Tensor, nn
 
 from .config import ModelConfig
 from .features import feature_index
+from .history import HISTORY_FEATURE_DIM
 
 
 class Time2Vec(nn.Module):
@@ -93,6 +94,15 @@ class RiskGNN(nn.Module):
         if self.temporal_encoding:
             self.time_encoder = Time2Vec(max(1, self.config.time_dim))
             self.time_projection = nn.Linear(max(1, self.config.time_dim), dim)
+        self.temporal_memory = bool(getattr(self.config, "temporal_memory", False))
+        if self.temporal_memory:
+            self.history_gru = nn.GRU(
+                HISTORY_FEATURE_DIM,
+                dim,
+                num_layers=1,
+                batch_first=True,
+            )
+            self.history_projection = nn.Linear(dim, dim)
         self.layers = nn.ModuleList(
             [
                 RelationalSAGEConv(
@@ -121,6 +131,8 @@ class RiskGNN(nn.Module):
         target_index: Tensor,
         *,
         time_phase: Tensor | None = None,
+        history: Tensor | None = None,
+        history_mask: Tensor | None = None,
         return_embedding: bool = False,
     ) -> Tensor | tuple[Tensor, Tensor]:
         h = self.input_projection(x) + self.type_embedding(node_types)
@@ -132,6 +144,18 @@ class RiskGNN(nn.Module):
         for layer in self.layers:
             h = h + layer(h, edge_index, edge_type, edge_weight, x)
         target_embedding = h[target_index]
+        if self.temporal_memory:
+            if history is None:
+                history = x.new_zeros((target_embedding.shape[0], 1, HISTORY_FEATURE_DIM))
+                history_mask = x.new_zeros((target_embedding.shape[0], 1))
+            if history_mask is None:
+                history_mask = torch.ones(history.shape[:2], dtype=history.dtype, device=history.device)
+            history_output, _ = self.history_gru(history)
+            lengths = history_mask.sum(dim=1).clamp_min(1).long()
+            memory = history_output[
+                torch.arange(history.shape[0], device=history.device), lengths - 1
+            ]
+            target_embedding = target_embedding + self.history_projection(memory)
         logits = self.classifier(target_embedding).squeeze(-1)
         if return_embedding:
             return logits, target_embedding

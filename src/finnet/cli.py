@@ -13,6 +13,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from .attacks import evaluate_adversarial
 from .baselines import run_baseline_benchmark
 from .calibration import Calibrator
 from .config import AppConfig, load_config
@@ -65,12 +66,10 @@ def _build_parser() -> argparse.ArgumentParser:
     train.add_argument("--identity", default=None, help="IEEE train_identity.csv")
     train.add_argument("--output", default=None, help="Checkpoint path")
     train.add_argument("--risk-gate", action="store_true", help="Enable risk-gated message passing")
-    train.add_argument(
-        "--temporal-encoding",
-        action="store_true",
-        help="Enable learned Time2Vec projection for transaction time phase",
-    )
+    train.add_argument("--temporal-encoding", action="store_true")
     train.add_argument("--time-dim", type=int, default=None)
+    train.add_argument("--temporal-memory", action="store_true")
+    train.add_argument("--simulate-rejection", action="store_true")
     train.add_argument("--json-out", default=None)
     train.set_defaults(func=_cmd_train)
 
@@ -140,6 +139,11 @@ def _build_parser() -> argparse.ArgumentParser:
     baseline.add_argument("--transactions", default=None)
     baseline.add_argument("--identity", default=None)
     baseline.add_argument("--output", default=None, help="Reserved for future output model path")
+    baseline.add_argument(
+        "--protocol",
+        choices=["temporal", "card-holdout", "device-holdout", "merchant-holdout"],
+        default="temporal",
+    )
     baseline.add_argument("--model", default=None)
     baseline.add_argument("--train-epochs", type=int, default=None)
     baseline.add_argument(
@@ -151,6 +155,33 @@ def _build_parser() -> argparse.ArgumentParser:
     baseline.add_argument("--false-negative-cost", type=float, default=10.0)
     baseline.add_argument("--json-out", default="artifacts/baseline_report.json")
     baseline.set_defaults(func=_cmd_baseline)
+
+    attack = sub.add_parser(
+        "attack-eval", help="Evaluate robustness under constrained evasive attacks"
+    )
+    _common_config(attack)
+    attack.add_argument("--source", choices=["synthetic", "ieee"], default=None)
+    attack.add_argument("--events", type=int, default=None, help="Synthetic event count")
+    attack.add_argument("--max-events", type=int, default=None)
+    attack.add_argument("--transactions", default=None)
+    attack.add_argument("--identity", default=None)
+    attack.add_argument("--model", default=None)
+    attack.add_argument(
+        "--attack",
+        action="append",
+        choices=[
+            "all",
+            "amount_noise",
+            "merchant_rotation",
+            "device_rotation",
+            "subnet_hopping",
+            "amount_split",
+            "time_scatter",
+        ],
+        default=None,
+    )
+    attack.add_argument("--json-out", default="artifacts/attack_report.json")
+    attack.set_defaults(func=_cmd_attack)
 
     calibrate = sub.add_parser("calibrate", help="Fit a JSON calibrator from a GNN checkpoint")
     _common_config(calibrate)
@@ -213,6 +244,10 @@ def _cmd_train(args: argparse.Namespace) -> int:
         sections.setdefault("model", {})["temporal_encoding"] = True
     if args.time_dim is not None:
         sections.setdefault("model", {})["time_dim"] = args.time_dim
+    if args.temporal_memory:
+        sections.setdefault("model", {})["temporal_memory"] = True
+    if args.simulate_rejection:
+        sections.setdefault("data", {})["simulate_rejection"] = True
     config = _config_from_args(args, **sections)
     events, source = load_events_for_training(config)
     print(f"loaded {len(events):,} events from {source}", flush=True)
@@ -327,6 +362,7 @@ def _cmd_baseline(args: argparse.Namespace) -> int:
         calibration_method=args.calibration_method,
         false_positive_cost=args.false_positive_cost,
         false_negative_cost=args.false_negative_cost,
+        protocol=args.protocol,
     )
     compact = _baseline_summary(report)
     print(json.dumps(compact, indent=2))
@@ -389,6 +425,29 @@ def _cmd_calibrate(args: argparse.Namespace) -> int:
     print(json.dumps(report, indent=2))
     if args.json_out:
         Path(args.json_out).write_text(json.dumps(report, indent=2), encoding="utf-8")
+    return 0
+
+
+def _cmd_attack(args: argparse.Namespace) -> int:
+    config = _baseline_config_from_args(args)
+    events, source = load_events_for_training(config)
+    checkpoint = Path(args.model or config.model.checkpoint)
+    if not checkpoint.exists():
+        raise FileNotFoundError(f"checkpoint not found: {checkpoint}")
+    selected = args.attack or ["all"]
+    transformations = None if "all" in selected else selected
+    print(f"loaded {len(events):,} events from {source}", flush=True)
+    report = evaluate_adversarial(
+        events,
+        config,
+        model_path=str(checkpoint),
+        transformations=transformations,
+        max_events=config.data.attack_eval_max_events,
+    )
+    report["source"] = source
+    print(json.dumps(report, indent=2))
+    Path(args.json_out).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.json_out).write_text(json.dumps(report, indent=2), encoding="utf-8")
     return 0
 
 

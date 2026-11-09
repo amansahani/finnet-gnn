@@ -27,6 +27,8 @@ from .features import (
     empty_features,
     log1p_safe,
 )
+from .history import HISTORY_LENGTH, HistoryEntry, history_feature_tuple, normalized_histories
+from .sketches import HyperLogLog
 from .telemetry import TelemetrySnapshot
 
 
@@ -53,6 +55,8 @@ class TransactionMeta:
     subnet_card_fanout: int
     device_card_fanout: int
     card_merchant_fanout: int
+    history: np.ndarray | None = None
+    history_mask: np.ndarray | None = None
 
 
 @dataclass
@@ -67,7 +71,7 @@ class NodeState:
     risk_ewma: float = 0.0
     blocked_until: float = 0.0
     counterpart_total: int = 0
-    counterparts: dict[NodeType, set[int]] = field(default_factory=dict)
+    counterparts: dict[NodeType, set[int] | HyperLogLog] = field(default_factory=dict)
     tx_meta: TransactionMeta | None = None
     deleted: bool = False
 
@@ -88,6 +92,8 @@ class GraphSnapshot:
     target_index: int
     node_ids: np.ndarray
     timestamp: float
+    history: np.ndarray | None = None
+    history_mask: np.ndarray | None = None
 
     @property
     def num_nodes(self) -> int:
@@ -128,6 +134,7 @@ class DynamicTransactionGraph:
         self._index: dict[tuple[NodeType, str], int] = {}
         self._adj: dict[int, dict[int, EdgeState]] = {}
         self._tx_queue: deque[int] = deque()
+        self._history: dict[str, deque[HistoryEntry]] = {}
         self._next_id = 0
         self._lock = threading.RLock()
         self._adds = 0
@@ -184,6 +191,7 @@ class DynamicTransactionGraph:
             self._add_counterpart_locked(merchant, NodeType.DEVICE, device.node_id)
             self._add_counterpart_locked(merchant, NodeType.CARD, card.node_id)
 
+            history, history_mask = self._history_locked(event)
             tx_node = self._create_locked(
                 NodeType.TRANSACTION,
                 f"{event.event_id}:{self._next_id}",
@@ -196,9 +204,11 @@ class DynamicTransactionGraph:
                 new_device=created[NodeType.DEVICE],
                 new_card=created[NodeType.CARD],
                 new_merchant=created[NodeType.MERCHANT],
-                subnet_card_fanout=len(subnet.counterparts.get(NodeType.CARD, ())),
-                device_card_fanout=len(device.counterparts.get(NodeType.CARD, ())),
-                card_merchant_fanout=len(card.counterparts.get(NodeType.MERCHANT, ())),
+                subnet_card_fanout=self._counterpart_count(subnet, NodeType.CARD),
+                device_card_fanout=self._counterpart_count(device, NodeType.CARD),
+                card_merchant_fanout=self._counterpart_count(card, NodeType.MERCHANT),
+                history=history,
+                history_mask=history_mask,
             )
             tx_node.tx_meta = meta
             tx_node.tx_count = 1
@@ -213,6 +223,7 @@ class DynamicTransactionGraph:
             ):
                 self._link_locked(tx_node.node_id, node.node_id, relation, at)
 
+            self._update_history_locked(event)
             self._tx_queue.append(tx_node.node_id)
             self._prune_tx_locked(at)
             return AddTransactionResult(node_id=tx_node.node_id, meta=meta)
@@ -296,6 +307,16 @@ class DynamicTransactionGraph:
                 target_index=local[target_node_id],
                 node_ids=np.asarray(selected, dtype=np.int64),
                 timestamp=at,
+                history=(
+                    target.tx_meta.history
+                    if target.tx_meta is not None
+                    else np.zeros((HISTORY_LENGTH, 6), dtype=np.float32)
+                ),
+                history_mask=(
+                    target.tx_meta.history_mask
+                    if target.tx_meta is not None
+                    else np.zeros(HISTORY_LENGTH, dtype=np.float32)
+                ),
             )
 
     def node_info(self, node_id: int) -> dict[str, object] | None:
@@ -369,13 +390,70 @@ class DynamicTransactionGraph:
                 edge.last_seen = at
 
     def _add_counterpart_locked(self, node: NodeState, node_type: NodeType, other_id: int) -> None:
+        if self.config.approx_fanout:
+            bucket = node.counterparts.get(node_type)
+            if not isinstance(bucket, HyperLogLog):
+                bucket = HyperLogLog(precision=self.config.approx_fanout_precision)
+                node.counterparts[node_type] = bucket
+            bucket.add(str(other_id))
+            return
         bucket = node.counterparts.setdefault(node_type, set())
+        if not isinstance(bucket, set):
+            # A sketch cannot become exact after the fact; start a new exact set only
+            # for this lifetime if a user changed configuration at runtime.
+            exact: set[int] = set()
+            node.counterparts[node_type] = exact
+            bucket = exact
         if other_id in bucket:
             return
         if len(bucket) >= self.config.fanout_cap:
             return
         bucket.add(other_id)
-        node.counterpart_total += 1
+
+    def _counterpart_count(self, node: NodeState, node_type: NodeType) -> int:
+        bucket = node.counterparts.get(node_type)
+        if bucket is None:
+            return 0
+        if isinstance(bucket, HyperLogLog):
+            return max(0, round(bucket.estimate()))
+        return len(bucket)
+
+    def _counterpart_total(self, node: NodeState) -> int:
+        return sum(self._counterpart_count(node, node_type) for node_type in node.counterparts)
+
+    def _history_keys(self, event: TransactionEvent) -> tuple[str, ...]:
+        return (
+            f"subnet:{event.subnet}",
+            f"device:{event.device_id}",
+            f"card:{event.card_token}",
+        )
+
+    def _history_locked(
+        self, event: TransactionEvent
+    ) -> tuple[np.ndarray, np.ndarray]:
+        selected: dict[str, HistoryEntry] = {}
+        for key in self._history_keys(event):
+            for entry in self._history.get(key, ()): 
+                selected[entry.event_id] = entry
+        return normalized_histories(selected.values(), HISTORY_LENGTH)
+
+    def _update_history_locked(self, event: TransactionEvent) -> None:
+        for key in self._history_keys(event):
+            bucket = self._history.setdefault(key, deque(maxlen=HISTORY_LENGTH))
+            previous = bucket[-1].timestamp if bucket else None
+            position = min(1.0, len(bucket) / max(1.0, HISTORY_LENGTH - 1))
+            entry = HistoryEntry(
+                event_id=f"{key}:{event.event_id}",
+                timestamp=event.timestamp,
+                features=history_feature_tuple(
+                    amount=event.amount,
+                    timestamp=event.timestamp,
+                    previous_timestamp=previous,
+                    payload=event.raw_payload,
+                    position=position,
+                ),
+            )
+            bucket.append(entry)
 
     def _bfs_locked(self, start: int, hops: int, max_nodes: int) -> list[int]:
         selected = [start]
@@ -413,7 +491,7 @@ class DynamicTransactionGraph:
         x[2] = log1p_safe(max(0.0, at - node.last_seen))
         x[3] = log1p_safe(node.avg_amount)
         x[4] = float(np.clip(node.risk_ewma, 0.0, 1.0))
-        x[5] = log1p_safe(node.counterpart_total)
+        x[5] = log1p_safe(self._counterpart_total(node))
         x[6] = 1.0 if at < node.blocked_until else 0.0
         x[7] = log1p_safe(max(0.0, at - node.first_seen))
         return x
@@ -496,9 +574,8 @@ class DynamicTransactionGraph:
             if neighbor is None:
                 continue
             bucket = neighbor.counterparts.get(node.node_type)
-            if bucket and node_id in bucket:
+            if isinstance(bucket, set) and node_id in bucket:
                 bucket.remove(node_id)
-                neighbor.counterpart_total = max(0, neighbor.counterpart_total - 1)
 
     def replay(
         self,

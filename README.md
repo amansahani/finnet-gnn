@@ -225,27 +225,43 @@ h_i' = ReLU(LayerNorm(W_self · h_i + a_i))
 ### Training protocol
 
 1. Sort events by timestamp.
-2. Time split (default 80/20) with a safeguard so both sides contain fraud.
-3. Replay training events, updating graph and telemetry.
-4. Retain a stratified sample of snapshots (all-fraud cap + normal sampling at `negative_ratio`).
-5. Mini-batch concatenated snapshots through the GNN.
-6. Evaluate held-out tail with ROC-AUC, PR-AUC, precision/recall/F1, confusion matrix, policy operating points, per-attack-type recall, and threshold-at-1%-FPR.
+2. Split time by default; optional card/device/merchant holdouts test entity-level generalisation.
+3. Optionally simulate legacy rejection decisions and importance-weight observed approved labels before replay.
+4. Replay training events, updating graph, telemetry, sketch counters and recent-history buffers.
+5. Retain a stratified sample of snapshots (all-fraud cap + normal sampling at `negative_ratio`).
+6. Mini-batch concatenated snapshots through the optional risk-gated/Time2Vec/history-GRU GNN.
+7. Evaluate held-out tails with AP first, ROC-AUC second, precision/recall/F1, calibration, confusion matrices, policy operating points, review-budget recall and per-attack-type recall.
 
 ### Research-informed evaluation harness
 
 Recent graph-fraud research is strongest on **average precision**, temporal splits and strong GBDT baselines. This repository includes a reproducible benchmark harness rather than relying on synthetic AUC alone.
 
+Implemented improvements include:
+
+- **Strong structural baselines:** LightGBM/XGBoost/CatBoost see 51 dimensions—24 target features, node-type counts, relation counts and undirected relation endpoint-pair counts.
+- **Entity-held-out protocols:** `--protocol temporal|card-holdout|device-holdout|merchant-holdout` tests unseen cards, devices or merchants rather than only random entities.
+- **Risk-gated message passing:** `--risk-gate` lets propagated entity risk modulate aggregation instead of being diluted by uniform neighborhoods.
+- **Time2Vec:** `--temporal-encoding` adds learned transaction-time phase encodings; `--temporal-memory` adds a GRU over the last eight raw transaction events for a target history.
+- **Reject-inference benchmark:** `--simulate-rejection` censors legacy choices using a synthetic label-free propensity model and trains on approved outcomes with in-sample importance weights. Replace those propensities with logged legacy scores for deployment.
+- **Adversarial robustness:** `finnet attack-eval` evaluates amount noise, merchant/device/subnet rotation, amount splitting and temporal scatter.
+- **Sketch-backed fanout:** `graph.approx_fanout=true` uses HyperLogLog counters to bound memory for high-cardinality attacks; exact sets remain the default.
+
 ```bash
-# Train the upgraded model (adds risk gating and Time2Vec)
+# Train the full upgraded stack
 finnet train --source synthetic --events 12000 --epochs 12 \
-  --risk-gate --temporal-encoding --time-dim 16 \
+  --risk-gate --temporal-encoding --temporal-memory --time-dim 16 \
+  --simulate-rejection \
   --output artifacts/risk_gnn_v2.pt
 
-# Compare logistic regression, histogram boosting, LightGBM, XGBoost,
-# CatBoost and the current GNN on the same temporal snapshots
+# Classical baselines and the GNN on the same temporal snapshots
 finnet baseline-run --source synthetic --events 12000 \
-  --model artifacts/risk_gnn_v2.pt \
+  --model artifacts/risk_gnn_v2.pt --protocol card-holdout \
   --json-out artifacts/baseline_report.json
+
+# Robustness under constrained evasive attacks
+finnet attack-eval --source synthetic --events 1500 \
+  --model artifacts/risk_gnn_v2.pt \
+  --json-out artifacts/attack_report.json
 
 # Fit an isotonic calibrator for the checkpoint
 finnet calibrate --source synthetic --events 12000 \
@@ -257,9 +273,9 @@ finnet serve --port 8583 --metrics-port 9101 \
   --trust-client-subnet --calibrator artifacts/calibrator.json --shadow-mode
 ```
 
-On the synthetic run, all classical baselines and the GNN saturate (AP ≈ 1.0). That is expected and should not be interpreted as proof of IEEE-CIS performance; it validates the harness and feature pipeline. Run `baseline-run --source ieee` with Kaggle data for a meaningful public comparison.
+On the synthetic run, all classical baselines and the GNN saturate (AP ≈ 1.0). That is expected and should not be interpreted as proof of IEEE-CIS performance; it validates the harness and feature pipeline. Run `baseline-run --source ieee` and `attack-eval --source ieee` with Kaggle data for a meaningful public comparison.
 
-`artifacts/baseline_report.json` reports Average Precision, ROC-AUC, Brier score, log loss, expected-cost-at-0.5, top-1%/5%/10% review-budget recall, calibrated ECE/MCE, and calibrated AP for each model.
+`artifacts/baseline_report.json` reports Average Precision, ROC-AUC, Brier score, log loss, expected-cost-at-0.5, top-1%/5%/10% review-budget recall, calibrated ECE/MCE, and calibrated AP for each model. `attack_report.json` records AP degradation under the same constrained attack set.
 
 Synthetic benchmark from `artifacts/risk_gnn.report.json`:
 

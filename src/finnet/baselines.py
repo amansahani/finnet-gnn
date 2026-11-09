@@ -17,18 +17,25 @@ from .evaluation import (
     available_baselines,
     evaluate_scores,
     fit_baseline,
-    flatten_target_features,
+    flatten_snapshot_features,
     predict_proba,
 )
 from .model import load_model_checkpoint
-from .training import evaluate_model, make_datasets, train_from_events
+from .training import (
+    evaluate_model,
+    make_datasets,
+    split_events_card_holdout,
+    split_events_device_holdout,
+    split_events_merchant_holdout,
+    train_from_events,
+)
 
 CalibrationMethod = Literal["none", "isotonic", "platt", "temperature"]
 
 
 def _stack_features(samples) -> tuple[np.ndarray, np.ndarray]:
     x = np.stack(
-        [flatten_target_features(sample.snapshot.x, sample.snapshot.target_index) for sample in samples],
+        [flatten_snapshot_features(sample.snapshot) for sample in samples],
         axis=0,
     )
     y = np.asarray([sample.label for sample in samples], dtype=int)
@@ -48,12 +55,25 @@ def run_baseline_benchmark(
     calibration_method: CalibrationMethod = "isotonic",
     model_path: str | Path | None = None,
     train_epochs: int | None = None,
+    protocol: Literal[
+        "temporal",
+        "card-holdout",
+        "device-holdout",
+        "merchant-holdout",
+    ] = "temporal",
     false_positive_cost: float = 1.0,
     false_negative_cost: float = 10.0,
     seed: int = 42,
 ) -> dict[str, object]:
     started = time.perf_counter()
-    train_samples, test_samples, _, _ = make_datasets(events, config)
+    protocol_splitters = {
+        "temporal": None,
+        "card-holdout": split_events_card_holdout,
+        "device-holdout": split_events_device_holdout,
+        "merchant-holdout": split_events_merchant_holdout,
+    }
+    splitter = protocol_splitters[protocol]
+    train_samples, test_samples, _, _ = make_datasets(events, config, splitter=splitter)
     if len(train_samples) == 0 or len(test_samples) == 0:
         raise ValueError("benchmark requires non-empty train/test snapshot sets")
     x_train, y_train = _stack_features(train_samples.samples)
@@ -147,6 +167,8 @@ def run_baseline_benchmark(
                         batch["edge_weight"],
                         batch["target_index"],
                         time_phase=batch.get("time_phase"),
+                        history=batch.get("history"),
+                        history_mask=batch.get("history_mask"),
                     )
                     train_scores.append(torch.sigmoid(logits).cpu().numpy())
                     train_labels.append(batch["labels"].cpu().numpy().astype(np.int64))
@@ -168,6 +190,7 @@ def run_baseline_benchmark(
 
     return {
         "source": source_name,
+        "protocol": protocol,
         "train_samples": train_samples.summary(),
         "test_samples": test_samples.summary(),
         "baselines": results,

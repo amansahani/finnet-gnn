@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import random
 import time
@@ -38,6 +39,7 @@ class GraphSample:
     label: int
     attack_type: str
     event_id: str
+    weight: float = 1.0
 
 
 class SampleSet:
@@ -92,8 +94,11 @@ def collate_graphs(items: Sequence[GraphSample]) -> dict[str, torch.Tensor]:
     etype_parts: list[np.ndarray] = []
     eweight_parts: list[np.ndarray] = []
     time_parts: list[np.ndarray] = []
+    history_parts: list[np.ndarray] = []
+    mask_parts: list[np.ndarray] = []
     target_parts: list[int] = []
     labels: list[int] = []
+    weights: list[float] = []
     node_offset = 0
     for item in items:
         snapshot = item.snapshot
@@ -105,8 +110,23 @@ def collate_graphs(items: Sequence[GraphSample]) -> dict[str, torch.Tensor]:
         time_parts.append(
             np.full(snapshot.num_nodes, snapshot.time_phase, dtype=np.float32)
         )
+        if snapshot.history is None:
+            from .history import HISTORY_FEATURE_DIM, HISTORY_LENGTH
+
+            history = np.zeros((HISTORY_LENGTH, HISTORY_FEATURE_DIM), dtype=np.float32)
+            mask = np.zeros(HISTORY_LENGTH, dtype=np.float32)
+        else:
+            history = snapshot.history.astype(np.float32, copy=False)
+            mask = (
+                snapshot.history_mask.astype(np.float32, copy=False)
+                if snapshot.history_mask is not None
+                else np.ones(history.shape[0], dtype=np.float32)
+            )
+        history_parts.append(history)
+        mask_parts.append(mask)
         target_parts.append(snapshot.target_index + node_offset)
         labels.append(item.label)
+        weights.append(item.weight)
         node_offset += snapshot.num_nodes
     return {
         "x": torch.from_numpy(np.concatenate(x_parts, axis=0)).float(),
@@ -115,8 +135,11 @@ def collate_graphs(items: Sequence[GraphSample]) -> dict[str, torch.Tensor]:
         "edge_type": torch.from_numpy(np.concatenate(etype_parts, axis=0)).long(),
         "edge_weight": torch.from_numpy(np.concatenate(eweight_parts, axis=0)).float(),
         "time_phase": torch.from_numpy(np.concatenate(time_parts, axis=0)).float(),
+        "history": torch.from_numpy(np.stack(history_parts, axis=0)).float(),
+        "history_mask": torch.from_numpy(np.stack(mask_parts, axis=0)).float(),
         "target_index": torch.tensor(target_parts, dtype=torch.long),
         "labels": torch.tensor(labels, dtype=torch.float32),
+        "sample_weights": torch.tensor(weights, dtype=torch.float32),
     }
 
 
@@ -129,6 +152,7 @@ def collect_phase(
     max_samples: int,
     negative_ratio: float,
     seed: int,
+    sample_weights: Sequence[float] | None = None,
     progress: Callable[[str], None] | None = None,
 ) -> SampleSet:
     """Replay events once, capturing a stratified temporal sample.
@@ -139,6 +163,8 @@ def collect_phase(
     """
 
     event_list = list(events)
+    if sample_weights is not None and len(sample_weights) != len(event_list):
+        raise ValueError("sample_weights must align with events")
     fraud_count = sum(1 for event in event_list if event.label == 1)
     normal_count = len(event_list) - fraud_count
     if fraud_count == 0:
@@ -172,6 +198,7 @@ def collect_phase(
                     label=event.label,
                     attack_type=event.attack_type,
                     event_id=event.event_id,
+                    weight=float(sample_weights[index]) if sample_weights is not None else 1.0,
                 )
             )
         graph.update_risk(added.node_id, heuristic_score(graph_snapshot), now=event.timestamp)
@@ -183,6 +210,61 @@ def collect_phase(
     if not retained:
         raise ValueError(f"{phase_name}: no snapshots retained; increase max_samples")
     return SampleSet(retained, phase_name)
+
+
+def split_events_entity_holdout(
+    events: Sequence[TransactionEvent],
+    entity: str,
+    train_fraction: float = 0.8,
+) -> tuple[list[TransactionEvent], list[TransactionEvent]]:
+    """Hold out one class of unrelated entity for generalisation tests.
+
+    ``entity`` is one of ``card``, ``device`` or ``merchant``. A deterministic
+    hash assigns about 25% of distinct entities to the held-out side, so the
+    split is reproducible and independent of event order.
+    """
+
+    attribute = {
+        "card": "card_token",
+        "device": "device_id",
+        "merchant": "merchant_id",
+    }.get(entity)
+    if attribute is None:
+        raise ValueError(f"unsupported holdout entity: {entity}")
+    ordered = sorted(events, key=lambda event: (event.timestamp, event.event_id))
+
+    def digest(value: str) -> int:
+        return int(hashlib.sha256(f"{entity}:{value}".encode()).hexdigest(), 16)
+
+    train: list[TransactionEvent] = []
+    test: list[TransactionEvent] = []
+    for event in ordered:
+        value = str(getattr(event, attribute))
+        if digest(value) % 4 == 0:
+            test.append(event)
+        else:
+            train.append(event)
+    if not train or not test or not any(event.label for event in test) or not any(event.label for event in train):
+        return split_events_time(events, train_fraction)
+    return train, test
+
+
+def split_events_card_holdout(
+    events: Sequence[TransactionEvent], train_fraction: float
+) -> tuple[list[TransactionEvent], list[TransactionEvent]]:
+    return split_events_entity_holdout(events, "card", train_fraction)
+
+
+def split_events_device_holdout(
+    events: Sequence[TransactionEvent], train_fraction: float
+) -> tuple[list[TransactionEvent], list[TransactionEvent]]:
+    return split_events_entity_holdout(events, "device", train_fraction)
+
+
+def split_events_merchant_holdout(
+    events: Sequence[TransactionEvent], train_fraction: float
+) -> tuple[list[TransactionEvent], list[TransactionEvent]]:
+    return split_events_entity_holdout(events, "merchant", train_fraction)
 
 
 def split_events_time(
@@ -213,9 +295,29 @@ def make_datasets(
     *,
     max_train_samples: int | None = None,
     max_test_samples: int | None = None,
+    splitter: Callable[
+        [Sequence[TransactionEvent], float],
+        tuple[list[TransactionEvent], list[TransactionEvent]],
+    ]
+    | None = None,
     progress: Callable[[str], None] | None = None,
 ) -> tuple[SampleSet, SampleSet, DynamicTransactionGraph, FlowTelemetry]:
-    train_events, test_events = split_events_time(events, config.data.train_fraction)
+    split_fn = splitter or split_events_time
+    train_events, test_events = split_fn(events, config.data.train_fraction)
+    rejection_report = None
+    sample_weights: list[float] | None = None
+    if config.data.simulate_rejection:
+        from .rejection import simulate_rejection
+
+        rejection = simulate_rejection(
+            list(train_events),
+            seed=config.data.rejection_seed,
+            propensity_floor=config.data.rejection_propensity_floor,
+            weight_cap=config.data.rejection_weight_cap,
+        )
+        train_events = rejection.approved_events
+        sample_weights = rejection.approved_weights
+        rejection_report = rejection.report
     graph = DynamicTransactionGraph(config.graph)
     telemetry = FlowTelemetry(config.telemetry)
     train_samples = collect_phase(
@@ -226,8 +328,11 @@ def make_datasets(
         max_samples=max_train_samples or config.data.max_train_samples,
         negative_ratio=config.data.negative_ratio,
         seed=config.model.seed,
+        sample_weights=sample_weights,
         progress=progress,
     )
+    if rejection_report is not None:
+        train_samples.rejection_report = rejection_report
     test_samples = collect_phase(
         test_events,
         graph=graph,
@@ -268,6 +373,8 @@ def evaluate_model(
                 batch["edge_weight"],
                 batch["target_index"],
                 time_phase=batch["time_phase"],
+                history=batch.get("history"),
+                history_mask=batch.get("history_mask"),
             )
             probabilities.append(torch.sigmoid(logits).cpu().numpy())
             labels.append(batch["labels"].cpu().numpy())
@@ -301,7 +408,7 @@ def train_from_events(
     positive = int(train_samples.labels.sum())
     negative = len(train_samples) - positive
     pos_weight = torch.tensor([min(20.0, negative / max(1, positive))], device=device)
-    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=model_config.learning_rate,
@@ -331,8 +438,17 @@ def train_from_events(
                 batch["edge_weight"],
                 batch["target_index"],
                 time_phase=batch["time_phase"],
+                history=batch.get("history"),
+                history_mask=batch.get("history_mask"),
             )
-            loss = criterion(logits, batch["labels"])
+            per_sample_loss = nn.functional.binary_cross_entropy_with_logits(
+                logits,
+                batch["labels"],
+                pos_weight=pos_weight,
+                reduction="none",
+            )
+            weights = batch.get("sample_weights", torch.ones_like(batch["labels"]))
+            loss = (per_sample_loss * weights).sum() / weights.sum().clamp_min(1e-6)
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
             optimizer.step()
@@ -358,6 +474,8 @@ def train_from_events(
     metrics["history"] = history
     metrics["train_samples"] = train_samples.summary()
     metrics["test_samples"] = test_samples.summary()
+    if hasattr(train_samples, "rejection_report"):
+        metrics["rejection_inference"] = train_samples.rejection_report
     metrics["model_parameters"] = model.parameter_count()
     metrics["source"] = source_name
     metrics["feature_names"] = list(NODE_FEATURE_NAMES)

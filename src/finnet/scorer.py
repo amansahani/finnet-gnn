@@ -112,7 +112,7 @@ class RiskScorer:
 
     def _gnn_score(self, snapshot: GraphSnapshot) -> float:
         assert self.model is not None
-        x, types, edge_index, edge_type, edge_weight, target, time_phase = _snapshot_tensors(
+        x, types, edge_index, edge_type, edge_weight, target, time_phase, history, history_mask = _snapshot_tensors(
             snapshot, self.device
         )
         with torch.no_grad():
@@ -124,6 +124,8 @@ class RiskScorer:
                 edge_weight,
                 target,
                 time_phase=time_phase,
+                history=history,
+                history_mask=history_mask,
             )
             return float(torch.sigmoid(logits).reshape(-1)[0].item())
 
@@ -133,13 +135,21 @@ class RiskScorer:
     def explain(self, snapshot: GraphSnapshot, top_k: int = 6) -> list[ExplanationItem]:
         if self.model is None:
             return []
-        x, types, edge_index, edge_type, edge_weight, target, time_phase = _snapshot_tensors(
+        x, types, edge_index, edge_type, edge_weight, target, time_phase, history, history_mask = _snapshot_tensors(
             snapshot, self.device
         )
         x = x.detach().clone().requires_grad_(True)
         self.model.zero_grad(set_to_none=True)
         logit = self.model(
-            x, types, edge_index, edge_type, edge_weight, target, time_phase=time_phase
+            x,
+            types,
+            edge_index,
+            edge_type,
+            edge_weight,
+            target,
+            time_phase=time_phase,
+            history=history,
+            history_mask=history_mask,
         ).reshape(-1)[0]
         logit.backward()
         grads = x.grad[target]
@@ -210,8 +220,22 @@ def _snapshot_tensors(
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
 ]:
     time_phase = np.full(snapshot.num_nodes, snapshot.time_phase, dtype=np.float32)
+    if snapshot.history is None:
+        from .history import HISTORY_FEATURE_DIM, HISTORY_LENGTH
+
+        history = np.zeros((HISTORY_LENGTH, HISTORY_FEATURE_DIM), dtype=np.float32)
+        history_mask = np.zeros(HISTORY_LENGTH, dtype=np.float32)
+    else:
+        history = snapshot.history.astype(np.float32, copy=False)
+        history_mask = (
+            snapshot.history_mask.astype(np.float32, copy=False)
+            if snapshot.history_mask is not None
+            else np.ones(history.shape[0], dtype=np.float32)
+        )
     return (
         torch.from_numpy(snapshot.x).to(device),
         torch.from_numpy(snapshot.node_types).to(device),
@@ -220,4 +244,6 @@ def _snapshot_tensors(
         torch.from_numpy(snapshot.edge_weight).to(device),
         torch.tensor([snapshot.target_index], dtype=torch.long, device=device),
         torch.from_numpy(time_phase).to(device),
+        torch.from_numpy(history[np.newaxis, :, :]).to(device),
+        torch.from_numpy(history_mask[np.newaxis, :]).to(device),
     )

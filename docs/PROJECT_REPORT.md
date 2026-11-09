@@ -284,7 +284,7 @@ fact that network fields are derived.
 Primary: Average Precision/PR-AUC, Recall@1%/5%/10% review budgets, expected cost
 under FP/FN costs, Brier score and expected calibration error. Secondary:
 ROC-AUC, precision/recall/F1 at 0.5 and at policy bands, confusion matrix,
-per-attack-type recall, per-attack-type recall, policy operating points, and
+per-attack-type recall, policy operating points, and
 latency/budget breaches. Reported results must include temporal and
 entity-held-out splits once IEEE-CIS is available.
 
@@ -425,8 +425,9 @@ size 32/64/128/256; temporal vs random split.
 6. Thresholds are fixed, not cost-optimised per merchant or currency.
 7. The demo authorises locally unless an upstream is configured.
 8. CPU-only evaluation; GPU latency and batching are untested.
-9. No adversarial adaptation (attacker knows the model) and no concept-drift
-   retraining schedule.
+9. Initial constrained attack evaluation exists (`finnet attack-eval`), but it
+   does not cover seeded graph poisoning, adaptive attackers, or multi-organisation
+   collaboration; full robustness claims remain out-of-scope.
 10. Simulator source subnets are claims via ISO field 61, not real network
     origins.
 

@@ -42,6 +42,39 @@ def flatten_target_features(x: np.ndarray, target_index: int) -> np.ndarray:
     return x[target_index].astype(float)
 
 
+def flatten_snapshot_features(snapshot) -> np.ndarray:
+    """Extract target features plus structural meta-path counts.
+
+    Structural counts let GBDT baselines use the same typed graph information
+    without a GNN: 24 target features + 5 node-type counts + 7 relation counts
+    + 15 undirected node-type-pair counts = 51 dimensions.
+    """
+
+    x = flatten_target_features(snapshot.x, snapshot.target_index)
+    node_counts = np.bincount(snapshot.node_types, minlength=5).astype(float)
+    edge_counts = np.bincount(snapshot.edge_type, minlength=7).astype(float)
+    pair_index = {tuple(sorted((i, j))): index for index, (i, j) in enumerate(_NODE_TYPE_PAIRS)}
+    pair_counts = np.zeros(len(_NODE_TYPE_PAIRS), dtype=float)
+    for source, target in snapshot.edge_index.T:
+        pair = tuple(sorted((int(snapshot.node_types[source]), int(snapshot.node_types[target]))))
+        pair_counts[pair_index[pair]] += 1.0
+    return np.concatenate(
+        [
+            x,
+            np.log1p(node_counts),
+            np.log1p(edge_counts),
+            np.log1p(pair_counts),
+        ]
+    ).astype(float)
+
+
+_NODE_TYPE_PAIRS = tuple(
+    (first, second)
+    for first in range(5)
+    for second in range(first, 5)
+)
+
+
 def available_baselines() -> dict[str, bool]:
     availability = {
         "logistic": True,
