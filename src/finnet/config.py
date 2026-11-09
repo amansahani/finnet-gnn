@@ -44,6 +44,9 @@ class ModelConfig:
     num_layers: int = 2
     relation_count: int = 7
     dropout: float = 0.15
+    risk_gate: bool = False
+    temporal_encoding: bool = False
+    time_dim: int = 16
     learning_rate: float = 2e-3
     weight_decay: float = 1e-4
     batch_size: int = 64
@@ -92,6 +95,11 @@ class PolicyConfig:
     firewall_backend: str = "audit"  # audit | pf | iptables
     firewall_command_timeout_s: float = 3.0
     firewall_audit_path: str = "artifacts/firewall.jsonl"
+    calibration_path: str = ""
+    shadow_mode: bool = False
+    shadow_action_label: str = "shadow"
+    cost_false_positive: float = 1.0
+    cost_false_negative: float = 10.0
 
 
 @dataclass(frozen=True)

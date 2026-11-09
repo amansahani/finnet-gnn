@@ -349,13 +349,15 @@ h_i^(0) = Dropout(ReLU(LayerNorm(W_in · x_i + t_{type(i)})))
 For each layer ℓ and node *i*:
 
 ```
-m_{j→i} = W_neigh · h_j^(ℓ) + e_{rel(i,j)}
-a_i     = (1 / |N(i)|) · Σ_{j∈N(i)} w_{ij} · m_{j→i}
+m_{j→i} = [W_neigh · h_j^(ℓ) + e_{rel(i,j)}] · w_ij · σ(W_risk · risk_j)
+a_i     = (1 / |N(i)|) · Σ_{j∈N(i)} m_{j→i}
 h_i^(ℓ+1) = Dropout(ReLU(LayerNorm(W_self · h_i^(ℓ) + a_i + b)))
 ```
 
 - `e_r` is a learned embedding per relation (7 relations)
-- `w_ij` is the edge weight, clamped to `[0.05, 1.0]`
+- `w_ij` is the repeat-count edge weight, clamped to `[0.05, 1.0]`
+- `risk_j` is the source node scalar `risk_ewma`; the risk gate is learnable and disabled by default for backward compatibility
+- if `temporal_encoding` is enabled, a learned Time2Vec projection of the transaction time phase is added after input projection
 - aggregation is a weighted mean via `index_add_`, implemented for both
   directions of each undirected edge
 - a residual connection (`h + layer(h)`) improves optimisation of the 2-layer stack
@@ -380,8 +382,10 @@ retraining.
 
 ### 7.5 Parameter count
 
-Default configuration: **23,937** trainable parameters. The model is small by
-design so a single CPU forward pass is well under a millisecond.
+The default configuration has **23,937** trainable parameters; enabling the
+optional risk gate and Time2Vec in `--risk-gate --temporal-encoding` yields
+25,313 parameters. The model remains small enough for sub-millisecond to
+low-millisecond CPU inference.
 
 ---
 
@@ -418,6 +422,20 @@ as a GNN result.
 matrix and reports `gradient × value` for the top-k features. This is a local
 linear attribution, useful for analyst review and dissertation examples. It is
 computed off the decision path.
+
+### 8.4 Calibration and shadow mode
+
+`finnet calibrate` fits an isotonic, Platt or temperature calibrator on a train
+split and serializes it as JSON. A gateway started with
+`--calibrator artifacts/calibrator.json` applies that mapping before policy
+scoring, leaving raw and calibrated probabilities in the decision log. A
+temperature is computed from logit scaling; isotonic and Platt are loaded from a
+JSON parameter document rather than executable pickle data.
+
+`policy.shadow_mode` records the action the GNN would have chosen but forces an
+allow/serve response. The original action is preserved in `shadow_action` and the
+audit log so operators can quantify projected enforcement before enabling it.
+Shadow mode does not quarantine or mutate the graph block window.
 
 ---
 

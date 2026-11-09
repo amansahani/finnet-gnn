@@ -94,6 +94,11 @@ class GraphSnapshot:
         return int(self.x.shape[0])
 
     @property
+    def time_phase(self) -> float:
+        hour = (self.timestamp / 3600.0) % 24.0
+        return hour / 24.0
+
+    @property
     def num_edges(self) -> int:
         return int(self.edge_index.shape[1])
 

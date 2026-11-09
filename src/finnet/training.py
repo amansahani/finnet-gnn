@@ -91,6 +91,7 @@ def collate_graphs(items: Sequence[GraphSample]) -> dict[str, torch.Tensor]:
     edge_parts: list[np.ndarray] = []
     etype_parts: list[np.ndarray] = []
     eweight_parts: list[np.ndarray] = []
+    time_parts: list[np.ndarray] = []
     target_parts: list[int] = []
     labels: list[int] = []
     node_offset = 0
@@ -101,6 +102,9 @@ def collate_graphs(items: Sequence[GraphSample]) -> dict[str, torch.Tensor]:
         edge_parts.append(snapshot.edge_index + node_offset)
         etype_parts.append(snapshot.edge_type)
         eweight_parts.append(snapshot.edge_weight)
+        time_parts.append(
+            np.full(snapshot.num_nodes, snapshot.time_phase, dtype=np.float32)
+        )
         target_parts.append(snapshot.target_index + node_offset)
         labels.append(item.label)
         node_offset += snapshot.num_nodes
@@ -110,6 +114,7 @@ def collate_graphs(items: Sequence[GraphSample]) -> dict[str, torch.Tensor]:
         "edge_index": torch.from_numpy(np.concatenate(edge_parts, axis=1)).long(),
         "edge_type": torch.from_numpy(np.concatenate(etype_parts, axis=0)).long(),
         "edge_weight": torch.from_numpy(np.concatenate(eweight_parts, axis=0)).float(),
+        "time_phase": torch.from_numpy(np.concatenate(time_parts, axis=0)).float(),
         "target_index": torch.tensor(target_parts, dtype=torch.long),
         "labels": torch.tensor(labels, dtype=torch.float32),
     }
@@ -262,6 +267,7 @@ def evaluate_model(
                 batch["edge_type"],
                 batch["edge_weight"],
                 batch["target_index"],
+                time_phase=batch["time_phase"],
             )
             probabilities.append(torch.sigmoid(logits).cpu().numpy())
             labels.append(batch["labels"].cpu().numpy())
@@ -324,6 +330,7 @@ def train_from_events(
                 batch["edge_type"],
                 batch["edge_weight"],
                 batch["target_index"],
+                time_phase=batch["time_phase"],
             )
             loss = criterion(logits, batch["labels"])
             loss.backward()

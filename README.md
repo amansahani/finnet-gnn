@@ -74,6 +74,8 @@ cd finnet-gnn
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
+# Optional, required for `finnet baseline-run` boosting baselines:
+pip install -e ".[benchmark]"
 ```
 
 If you prefer an existing virtual environment, activate it before running the commands:
@@ -207,15 +209,18 @@ Topology features: **new subnet**, **new device**, **new card**, **new merchant*
 
 ```
 m_ij = W_neigh · h_j + e_relation
-h_i' = ReLU(LayerNorm(W_self · h_i + mean_j(m_ij · edge_weight)))
+a_i  = mean_j(edge_weight · risk_gate_j · m_ij)
+h_i' = ReLU(LayerNorm(W_self · h_i + a_i))
 ```
 
-- 2 layers, hidden width 64 by default, ~24k parameters.
+- 2 layers, hidden width 64 by default. Baseline default remains ~24k parameters; `--risk-gate` and `--temporal-encoding` add small projection layers.
+- Optional **risk gate** (`--risk-gate`) scales messages by the source node's propagated `risk_ewma`, so high-risk neighbors are not diluted by uniform aggregation.
+- Optional **Time2Vec** (`--temporal-encoding --time-dim 16`) projects transaction time phase and broadcasts it across the local snapshot before message passing.
 - Node type embeddings make subnet/device/card/merchant/transaction separable.
 - Snapshots are local 2-hop subgraphs (max 128 nodes), so **unseen entities are scored immediately** with no retraining and no entity-ID lookup table.
 - Training uses time-ordered replay: no future transaction leaks into a snapshot.
 - Risk feedback uses a label-free topology prior, not future labels, keeping offline graph state consistent with online serving.
-- Focal class weighting handles the fraud imbalance.
+- Class weighting handles the fraud imbalance; `positive_weight = min(20, normal/fraud)`.
 
 ### Training protocol
 
@@ -225,6 +230,36 @@ h_i' = ReLU(LayerNorm(W_self · h_i + mean_j(m_ij · edge_weight)))
 4. Retain a stratified sample of snapshots (all-fraud cap + normal sampling at `negative_ratio`).
 5. Mini-batch concatenated snapshots through the GNN.
 6. Evaluate held-out tail with ROC-AUC, PR-AUC, precision/recall/F1, confusion matrix, policy operating points, per-attack-type recall, and threshold-at-1%-FPR.
+
+### Research-informed evaluation harness
+
+Recent graph-fraud research is strongest on **average precision**, temporal splits and strong GBDT baselines. This repository includes a reproducible benchmark harness rather than relying on synthetic AUC alone.
+
+```bash
+# Train the upgraded model (adds risk gating and Time2Vec)
+finnet train --source synthetic --events 12000 --epochs 12 \
+  --risk-gate --temporal-encoding --time-dim 16 \
+  --output artifacts/risk_gnn_v2.pt
+
+# Compare logistic regression, histogram boosting, LightGBM, XGBoost,
+# CatBoost and the current GNN on the same temporal snapshots
+finnet baseline-run --source synthetic --events 12000 \
+  --model artifacts/risk_gnn_v2.pt \
+  --json-out artifacts/baseline_report.json
+
+# Fit an isotonic calibrator for the checkpoint
+finnet calibrate --source synthetic --events 12000 \
+  --model artifacts/risk_gnn_v2.pt \
+  --method isotonic --output artifacts/calibrator.json
+
+# Shadow deployment records decisions without enforcing them
+finnet serve --port 8583 --metrics-port 9101 \
+  --trust-client-subnet --calibrator artifacts/calibrator.json --shadow-mode
+```
+
+On the synthetic run, all classical baselines and the GNN saturate (AP ≈ 1.0). That is expected and should not be interpreted as proof of IEEE-CIS performance; it validates the harness and feature pipeline. Run `baseline-run --source ieee` with Kaggle data for a meaningful public comparison.
+
+`artifacts/baseline_report.json` reports Average Precision, ROC-AUC, Brier score, log loss, expected-cost-at-0.5, top-1%/5%/10% review-budget recall, calibrated ECE/MCE, and calibrated AP for each model.
 
 Synthetic benchmark from `artifacts/risk_gnn.report.json`:
 
@@ -301,7 +336,7 @@ finnet-gnn/
 │       ├── synthetic.py
 │       ├── ieee_cis.py
 │       └── common.py
-├── tests/               # 30 unit/integration tests
+├── tests/               # 33 unit/integration tests
 ├── docs/
 │   ├── ARCHITECTURE.md
 │   ├── PROJECT_REPORT.md
@@ -328,7 +363,8 @@ Current suite covers:
 - policy bands, token exhaustion, repeat-offender promotion, quarantine TTL, firewall audit;
 - engine + real socket integration through the async server;
 - temporal split, synthetic attack composition, IEEE adapter, full training smoke test;
-- metrics rendering and quantiles.
+- metrics rendering and quantiles;
+- calibration JSON round-trip, average precision/review-budget/cost metrics, and the classical-baseline benchmark harness with the upgraded risk-gated/Time2Vec model.
 
 ---
 

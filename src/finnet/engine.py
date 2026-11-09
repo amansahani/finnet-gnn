@@ -12,6 +12,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
+from .calibration import Calibrator
 from .config import AppConfig
 from .data.common import TransactionEvent, event_from_iso
 from .graph import DynamicTransactionGraph, GraphSnapshot
@@ -41,6 +44,9 @@ class EngineResult:
     score_source: str = "unknown"
     inference_latency_ms: float = 0.0
     within_budget: bool = True
+    raw_score: float | None = None
+    calibrated_score: float | None = None
+    shadow_action: str = ""
     features: dict[str, float] | None = None
     tx_node_id: int | None = None
     snapshot: GraphSnapshot | None = None
@@ -57,6 +63,9 @@ class EngineResult:
             "merchant_id": event.merchant_id if event else None,
             "amount": event.amount if event else None,
             "score": round(self.score, 6),
+            "raw_score": round(self.raw_score, 6) if self.raw_score is not None else round(self.score, 6),
+            "calibrated_score": round(self.calibrated_score, 6) if self.calibrated_score is not None else None,
+            "shadow_action": self.shadow_action,
             "score_source": self.score_source,
             "action": self.action.value,
             "reason": self.reason,
@@ -76,6 +85,14 @@ class GatewayEngine:
         self.scorer = RiskScorer(config.model, config.model.checkpoint)
         self.policy = PolicyEngine(config.policy)
         self.metrics = Metrics()
+        self.calibrator: Calibrator | None = None
+        self.calibration_error = ""
+        calibration_path = Path(config.policy.calibration_path) if config.policy.calibration_path else None
+        if calibration_path is not None:
+            try:
+                self.calibrator = Calibrator.load(calibration_path)
+            except Exception as exc:  # noqa: BLE001 - bad calibration must not take the gateway down
+                self.calibration_error = f"{type(exc).__name__}: {exc}"
         self._executor = ThreadPoolExecutor(
             max_workers=max(1, config.server.worker_threads),
             thread_name_prefix="finnet-infer",
@@ -160,6 +177,9 @@ class GatewayEngine:
             "model_loaded": self.scorer.model_loaded,
             "model_source": "gnn" if self.scorer.model_loaded else "heuristic",
             "model_load_error": self.scorer.load_error,
+            "calibrated": self.calibrator is not None,
+            "calibration_error": self.calibration_error,
+            "shadow_mode": self.config.policy.shadow_mode,
             "graph": self.graph.stats(),
             "flows": len(self.telemetry),
             "policy": self.policy.status(),
@@ -215,12 +235,33 @@ class GatewayEngine:
         added = self.graph.add_transaction(event, telemetry, now=now)
         snapshot = self.graph.snapshot(added.node_id, now=now)
         score_result = self.scorer.predict(snapshot)
+        raw_score = score_result.score
+        calibrated_score = raw_score
+        if self.calibrator is not None:
+            try:
+                calibrated_score = float(self.calibrator.predict(np.asarray([raw_score]))[0])
+            except Exception as exc:  # noqa: BLE001 - keep serving on calibrator fault
+                calibrated_score = raw_score
+                self.metrics.inc("finnet_calibration_errors_total", stage="predict")
+                self.calibration_error = f"{type(exc).__name__}: {exc}"
         decision = self.policy.decide(
             subnet=event.subnet,
-            score=score_result.score,
+            score=calibrated_score,
             telemetry=telemetry,
             now=time.monotonic(),
         )
+        shadow_action = ""
+        if self.config.policy.shadow_mode and decision.action != Action.ALLOW:
+            shadow_action = decision.action.value
+            decision = PolicyDecision(
+                action=Action.ALLOW,
+                reason=f"shadow mode would take {shadow_action}: {decision.reason}",
+                score=decision.score,
+                response_code="00",
+                delay_ms=0.0,
+                close_socket=False,
+                send_response=True,
+            )
         # The label-free prior maintains graph risk features for future events.
         # The policy itself is driven only by the GNN score.
         self.graph.update_risk(added.node_id, heuristic_score(snapshot), now=now)
@@ -233,7 +274,7 @@ class GatewayEngine:
         features = self.graph.feature_vector(snapshot)
         return EngineResult(
             action=decision.action,
-            score=score_result.score,
+            score=calibrated_score,
             reason=decision.reason,
             response_code=decision.response_code,
             delay_ms=decision.delay_ms,
@@ -244,6 +285,9 @@ class GatewayEngine:
             score_source=score_result.source,
             inference_latency_ms=score_result.latency_ms,
             within_budget=score_result.within_budget,
+            raw_score=raw_score,
+            calibrated_score=calibrated_score if self.calibrator is not None else None,
+            shadow_action=shadow_action,
             features=features,
             tx_node_id=added.node_id,
             snapshot=snapshot,

@@ -112,7 +112,7 @@ class RiskScorer:
 
     def _gnn_score(self, snapshot: GraphSnapshot) -> float:
         assert self.model is not None
-        x, types, edge_index, edge_type, edge_weight, target = _snapshot_tensors(
+        x, types, edge_index, edge_type, edge_weight, target, time_phase = _snapshot_tensors(
             snapshot, self.device
         )
         with torch.no_grad():
@@ -123,6 +123,7 @@ class RiskScorer:
                 edge_type,
                 edge_weight,
                 target,
+                time_phase=time_phase,
             )
             return float(torch.sigmoid(logits).reshape(-1)[0].item())
 
@@ -132,12 +133,14 @@ class RiskScorer:
     def explain(self, snapshot: GraphSnapshot, top_k: int = 6) -> list[ExplanationItem]:
         if self.model is None:
             return []
-        x, types, edge_index, edge_type, edge_weight, target = _snapshot_tensors(
+        x, types, edge_index, edge_type, edge_weight, target, time_phase = _snapshot_tensors(
             snapshot, self.device
         )
         x = x.detach().clone().requires_grad_(True)
         self.model.zero_grad(set_to_none=True)
-        logit = self.model(x, types, edge_index, edge_type, edge_weight, target).reshape(-1)[0]
+        logit = self.model(
+            x, types, edge_index, edge_type, edge_weight, target, time_phase=time_phase
+        ).reshape(-1)[0]
         logit.backward()
         grads = x.grad[target]
         values = x.detach()[target]
@@ -199,7 +202,16 @@ def heuristic_score(snapshot: GraphSnapshot) -> float:
 
 def _snapshot_tensors(
     snapshot: GraphSnapshot, device: torch.device
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
+    time_phase = np.full(snapshot.num_nodes, snapshot.time_phase, dtype=np.float32)
     return (
         torch.from_numpy(snapshot.x).to(device),
         torch.from_numpy(snapshot.node_types).to(device),
@@ -207,4 +219,5 @@ def _snapshot_tensors(
         torch.from_numpy(snapshot.edge_type).to(device),
         torch.from_numpy(snapshot.edge_weight).to(device),
         torch.tensor([snapshot.target_index], dtype=torch.long, device=device),
+        torch.from_numpy(time_phase).to(device),
     )

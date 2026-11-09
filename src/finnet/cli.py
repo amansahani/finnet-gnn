@@ -13,15 +13,19 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from .baselines import run_baseline_benchmark
+from .calibration import Calibrator
 from .config import AppConfig, load_config
 from .data.synthetic import event_to_row, generate_synthetic_events
+from .evaluation import evaluate_scores
 from .features import NODE_FEATURE_NAMES
 from .graph import DynamicTransactionGraph
+from .model import load_model_checkpoint
 from .scorer import RiskScorer
 from .server import GatewayServer
 from .simulator import SimulatorConfig, run_simulation
 from .telemetry import FlowTelemetry
-from .training import load_events_for_training, train_from_events
+from .training import evaluate_model, load_events_for_training, train_from_events
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -60,6 +64,13 @@ def _build_parser() -> argparse.ArgumentParser:
     train.add_argument("--transactions", default=None, help="IEEE train_transaction.csv")
     train.add_argument("--identity", default=None, help="IEEE train_identity.csv")
     train.add_argument("--output", default=None, help="Checkpoint path")
+    train.add_argument("--risk-gate", action="store_true", help="Enable risk-gated message passing")
+    train.add_argument(
+        "--temporal-encoding",
+        action="store_true",
+        help="Enable learned Time2Vec projection for transaction time phase",
+    )
+    train.add_argument("--time-dim", type=int, default=None)
     train.add_argument("--json-out", default=None)
     train.set_defaults(func=_cmd_train)
 
@@ -78,6 +89,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     serve.add_argument("--enable-os-firewall", action="store_true")
     serve.add_argument("--firewall-backend", choices=["audit", "pf", "iptables"], default=None)
+    serve.add_argument("--calibrator", default=None, help="Path to JSON calibrator written by `finnet calibrate`")
+    serve.add_argument("--shadow-mode", action="store_true", help="Compute actions but force ALLOW responses")
     serve.set_defaults(func=_cmd_serve)
 
     simulate = sub.add_parser("simulate", help="Send legitimate and attack traffic")
@@ -116,6 +129,43 @@ def _build_parser() -> argparse.ArgumentParser:
     download = sub.add_parser("download-data", help="Download IEEE-CIS via Kaggle CLI")
     download.add_argument("--dest", default="data")
     download.set_defaults(func=_cmd_download)
+
+    baseline = sub.add_parser(
+        "baseline-run", help="Run classical baselines and compare with the GNN"
+    )
+    _common_config(baseline)
+    baseline.add_argument("--source", choices=["synthetic", "ieee"], default=None)
+    baseline.add_argument("--events", type=int, default=None, help="Synthetic event count")
+    baseline.add_argument("--max-events", type=int, default=None)
+    baseline.add_argument("--transactions", default=None)
+    baseline.add_argument("--identity", default=None)
+    baseline.add_argument("--output", default=None, help="Reserved for future output model path")
+    baseline.add_argument("--model", default=None)
+    baseline.add_argument("--train-epochs", type=int, default=None)
+    baseline.add_argument(
+        "--calibration-method",
+        choices=["none", "isotonic", "platt", "temperature"],
+        default="isotonic",
+    )
+    baseline.add_argument("--false-positive-cost", type=float, default=1.0)
+    baseline.add_argument("--false-negative-cost", type=float, default=10.0)
+    baseline.add_argument("--json-out", default="artifacts/baseline_report.json")
+    baseline.set_defaults(func=_cmd_baseline)
+
+    calibrate = sub.add_parser("calibrate", help="Fit a JSON calibrator from a GNN checkpoint")
+    _common_config(calibrate)
+    calibrate.add_argument("--source", choices=["synthetic", "ieee"], default=None)
+    calibrate.add_argument("--events", type=int, default=None, help="Synthetic event count")
+    calibrate.add_argument("--max-events", type=int, default=None)
+    calibrate.add_argument("--transactions", default=None)
+    calibrate.add_argument("--identity", default=None)
+    calibrate.add_argument("--model", default=None)
+    calibrate.add_argument(
+        "--method", choices=["isotonic", "platt", "temperature"], default="isotonic"
+    )
+    calibrate.add_argument("--output", default="artifacts/calibrator.json")
+    calibrate.add_argument("--json-out", default=None)
+    calibrate.set_defaults(func=_cmd_calibrate)
 
     info = sub.add_parser("info", help="Show effective configuration and model status")
     _common_config(info)
@@ -157,6 +207,12 @@ def _cmd_train(args: argparse.Namespace) -> int:
         sections.setdefault("data", {})["identity_csv"] = args.identity
     if args.output:
         sections.setdefault("model", {})["checkpoint"] = args.output
+    if args.risk_gate:
+        sections.setdefault("model", {})["risk_gate"] = True
+    if args.temporal_encoding:
+        sections.setdefault("model", {})["temporal_encoding"] = True
+    if args.time_dim is not None:
+        sections.setdefault("model", {})["time_dim"] = args.time_dim
     config = _config_from_args(args, **sections)
     events, source = load_events_for_training(config)
     print(f"loaded {len(events):,} events from {source}", flush=True)
@@ -194,6 +250,10 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         sections.setdefault("policy", {})["enable_os_firewall"] = True
     if args.firewall_backend:
         sections.setdefault("policy", {})["firewall_backend"] = args.firewall_backend
+    if args.calibrator:
+        sections.setdefault("policy", {})["calibration_path"] = args.calibrator
+    if args.shadow_mode:
+        sections.setdefault("policy", {})["shadow_mode"] = True
     if args.no_uvloop:
         sections.setdefault("server", {})["use_uvloop"] = False
     if args.trust_client_subnet:
@@ -234,6 +294,101 @@ def _run_server(config: AppConfig) -> int:
         print("gateway stopped", flush=True)
 
     asyncio.run(runner())
+    return 0
+
+
+def _baseline_config_from_args(args: argparse.Namespace):
+    sections: dict[str, Any] = {}
+    if getattr(args, "source", None):
+        sections.setdefault("data", {})["source"] = args.source
+    if getattr(args, "events", None):
+        sections.setdefault("data", {})["synthetic_events"] = args.events
+    if getattr(args, "max_events", None):
+        sections.setdefault("data", {})["max_events"] = args.max_events
+    if getattr(args, "transactions", None):
+        sections.setdefault("data", {})["transactions_csv"] = args.transactions
+    if getattr(args, "identity", None):
+        sections.setdefault("data", {})["identity_csv"] = args.identity
+    if getattr(args, "model", None):
+        sections.setdefault("model", {})["checkpoint"] = args.model
+    return _config_from_args(args, **sections)
+
+
+def _cmd_baseline(args: argparse.Namespace) -> int:
+    config = _baseline_config_from_args(args)
+    events, source = load_events_for_training(config)
+    print(f"loaded {len(events):,} events from {source}", flush=True)
+    report = run_baseline_benchmark(
+        events,
+        config,
+        source_name=source,
+        model_path=args.model or config.model.checkpoint,
+        train_epochs=args.train_epochs,
+        calibration_method=args.calibration_method,
+        false_positive_cost=args.false_positive_cost,
+        false_negative_cost=args.false_negative_cost,
+    )
+    compact = _baseline_summary(report)
+    print(json.dumps(compact, indent=2))
+    Path(args.json_out).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.json_out).write_text(json.dumps(report, indent=2), encoding="utf-8")
+    return 0
+
+
+def _baseline_summary(report: dict[str, Any]) -> dict[str, Any]:
+    baselines = report.get("baselines", {})
+    summary: dict[str, Any] = {}
+    for name, payload in baselines.items():
+        if not isinstance(payload, dict) or not payload.get("available", False):
+            continue
+        raw = payload.get("raw", {})
+        summary[name] = {
+            key: raw.get(key)
+            for key in (
+                "auc_roc",
+                "average_precision",
+                "precision_at_0.5",
+                "recall_at_0.5",
+                "expected_cost_at_0.5",
+            )
+        }
+        if "calibrated" in payload:
+            calibrated = payload["calibrated"]
+            summary[name]["calibrated_average_precision"] = calibrated.get("average_precision")
+            summary[name]["calibrated_ece"] = calibrated.get("calibration", {}).get("ece")
+    return summary
+
+
+def _cmd_calibrate(args: argparse.Namespace) -> int:
+    config = _baseline_config_from_args(args)
+    events, source = load_events_for_training(config)
+    checkpoint = Path(args.model or config.model.checkpoint)
+    if not checkpoint.exists():
+        raise FileNotFoundError(f"checkpoint not found: {checkpoint}")
+    from .training import make_datasets
+
+    train_samples, test_samples, _, _ = make_datasets(events, config)
+    model, _ = load_model_checkpoint(str(checkpoint), config.model.device)
+    train_probabilities, train_labels = evaluate_model(
+        model, train_samples, batch_size=256, device=config.model.device
+    )
+    test_probabilities, test_labels = evaluate_model(
+        model, test_samples, batch_size=256, device=config.model.device
+    )
+    calibrator = Calibrator.fit(train_probabilities, train_labels, args.method)
+    calibrator.save(args.output)
+    calibrated_test = calibrator.predict(test_probabilities)
+    report = {
+        "source": source,
+        "model": str(checkpoint),
+        "method": args.method,
+        "output": str(args.output),
+        "before": evaluate_scores(test_labels, test_probabilities),
+        "after": evaluate_scores(test_labels, calibrated_test),
+    }
+    print(json.dumps(report, indent=2))
+    if args.json_out:
+        Path(args.json_out).write_text(json.dumps(report, indent=2), encoding="utf-8")
     return 0
 
 

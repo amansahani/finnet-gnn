@@ -11,6 +11,9 @@ model:
   hidden_dim: 64
   num_layers: 2
   dropout: 0.15
+  risk_gate: false
+  temporal_encoding: false
+  time_dim: 16
   epochs: 12
   batch_size: 64
   learning_rate: 0.002
@@ -34,6 +37,10 @@ policy:
   # host firewall. Set true only after reading docs/FIREWALL.md.
   enable_os_firewall: false
   firewall_backend: audit
+  calibration_path: ""
+  shadow_mode: false
+  cost_false_positive: 1.0
+  cost_false_negative: 10.0
 
 data:
   source: synthetic

@@ -22,8 +22,8 @@ BENCH_ITERATIONS ?= 2000
 BENCH_EVENTS ?= 8000
 
 .DEFAULT_GOAL := help
-.PHONY: help install install-dev test lint train train-ieee serve serve-prod \
-        simulate demo demo-retrain benchmark download-data gen-data info report clean distclean
+.PHONY: help install install-dev test lint train train-upgraded train-ieee serve serve-prod \
+        simulate demo demo-retrain baseline-run calibrate benchmark download-data gen-data info report clean distclean
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*##"; printf "FinNet-GNN targets:\n\n"} \
@@ -68,6 +68,21 @@ demo: ## Train if needed, start an ephemeral gateway, and simulate an attack
 
 demo-retrain: ## Force a fresh demo model before simulating
 	$(FINNET) demo --config $(CONFIG) --events 450 --retrain
+
+train-upgraded: ## Train the risk-gated Time2Vec GNN
+	$(FINNET) train --config $(CONFIG) --source synthetic \
+		--events $(EVENTS) --epochs $(EPOCHS) --risk-gate --temporal-encoding --time-dim 16 \
+		--output artifacts/risk_gnn_v2.pt
+
+baseline-run: ## Compare classical baselines and the GNN
+	$(FINNET) baseline-run --config $(CONFIG) --source synthetic \
+		--events $(EVENTS) --model artifacts/risk_gnn_v2.pt \
+		--json-out artifacts/baseline_report.json
+
+calibrate: ## Fit a JSON calibrator for a checkpoint
+	$(FINNET) calibrate --config $(CONFIG) --source synthetic \
+		--events $(EVENTS) --model $(CHECKPOINT) \
+		--method isotonic --output artifacts/calibrator.json
 
 benchmark: ## Measure graph export + GNN scoring latency
 	$(FINNET) benchmark --config $(CONFIG) --model $(CHECKPOINT) \

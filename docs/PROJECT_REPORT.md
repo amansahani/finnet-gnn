@@ -77,10 +77,13 @@ Design and evaluate a gateway that:
   rate, payload entropy, RTT proxy).
 - A bounded dynamic multipartite graph with fan-out counters and inductive
   2-hop snapshot export.
-- A relational GraphSAGE model with relation embeddings, edge weights and a
-  target-node classifier.
+- A relational GraphSAGE model with relation embeddings, edge weights, optional
+  risk-gated message passing and transaction-time Time2Vec encoding.
+- A reproducible classical-vs-GNN evaluation harness with LightGBM, XGBoost,
+  CatBoost, average precision, review-budget recall, expected cost and ECE.
 - A closed-loop policy engine with token buckets, TTL quarantine, socket
-  teardown and an audited firewall adapter.
+  teardown, optional isotonic/Platt/temperature calibration, shadow mode and an
+  audited firewall adapter.
 - A reproducible synthetic benchmark, a temporal training protocol, and an
   IEEE-CIS adapter with an explicit honesty boundary.
 
@@ -245,14 +248,20 @@ feedback uses a label-free heuristic prior so no future label leaks.
 | Python | 3.12.2 |
 | PyTorch | 2.9.0 |
 | NumPy / pandas / scikit-learn | 2.5.0 / 2.3.3 / 1.7.0 |
+| LightGBM / XGBoost / CatBoost | 4.6.0 / 3.3.0 / 1.2.10 |
 | uvloop | 0.23.0 |
 
 ### 5.2 Synthetic benchmark
 
 ```bash
 finnet train --source synthetic --events 12000 --epochs 12 \
-  --output artifacts/risk_gnn.pt
-finnet benchmark --model artifacts/risk_gnn.pt --iterations 2000 --events 8000
+  --risk-gate --temporal-encoding --time-dim 16 \
+  --output artifacts/risk_gnn_v2.pt
+finnet baseline-run --source synthetic --events 12000 \
+  --model artifacts/risk_gnn_v2.pt --json-out artifacts/baseline_report.json
+finnet calibrate --source synthetic --events 12000 \
+  --model artifacts/risk_gnn_v2.pt --method isotonic --output artifacts/calibrator.json
+finnet benchmark --model artifacts/risk_gnn_v2.pt --iterations 2000 --events 8000
 finnet demo --no-train --events 300
 ```
 
@@ -272,9 +281,12 @@ fact that network fields are derived.
 
 ### 5.4 Metrics
 
-ROC-AUC, PR-AUC, precision/recall/F1 at 0.5 and at each policy band, confusion
-matrix, per-attack-type recall, threshold at ≤1% FPR, graph+GNN latency
-percentiles, budget breaches, and live mitigation counts.
+Primary: Average Precision/PR-AUC, Recall@1%/5%/10% review budgets, expected cost
+under FP/FN costs, Brier score and expected calibration error. Secondary:
+ROC-AUC, precision/recall/F1 at 0.5 and at policy bands, confusion matrix,
+per-attack-type recall, per-attack-type recall, policy operating points, and
+latency/budget breaches. Reported results must include temporal and
+entity-held-out splits once IEEE-CIS is available.
 
 ---
 
@@ -309,6 +321,29 @@ Per-attack-type mean score (test tail):
 scores confirm the pipeline learns the intended topology, not that it would
 generalise to real traffic. This table must be labelled synthetic in the final
 report.
+
+### 6.1a Upgraded synthetic model: risk gate + Time2Vec
+
+Reproduced from `artifacts/risk_gnn_v2.report.json`:
+
+| Metric | Value |
+|---|---:|
+| ROC-AUC | 1.000 |
+| PR-AUC / AP | 1.000 |
+| Accuracy @ 0.5 | 0.9990 |
+| Precision @ 0.5 | 0.9961 |
+| Recall @ 0.5 | 1.000 |
+| Train / test snapshots | 2,783 / 1,039 |
+| Parameters | 25,313 |
+| Train time (CPU) | 22.5 s |
+| Graph + snapshot + GNN p50 / p95 / p99 | 1.014 / 1.493 / 2.572 ms |
+| GNN forward only p50 / p95 / p99 | 0.439 / 0.542 / 1.254 ms |
+
+The classical-vs-GNN benchmark on the same temporal snapshots also saturates
+(AP ≈ 1.0 for histogram boosting, LightGBM, XGBoost, CatBoost and GNN), because
+the synthetic generator is separable. This result establishes the evaluation
+harness and should not be used as evidence of IEEE-CIS performance. See
+`artifacts/baseline_report.json`.
 
 ### 6.2 Latency
 
