@@ -1,0 +1,44 @@
+server:
+  host: 127.0.0.1
+  port: 8583
+  metrics_host: 127.0.0.1
+  metrics_port: 9101
+  use_uvloop: true
+  upstream_host: ""
+  upstream_port: 0
+
+model:
+  hidden_dim: 64
+  num_layers: 2
+  dropout: 0.15
+  epochs: 12
+  batch_size: 64
+  learning_rate: 0.002
+  inference_budget_ms: 20.0
+
+graph:
+  max_entities: 200000
+  max_tx_nodes: 50000
+  snapshot_hops: 2
+  max_snapshot_nodes: 128
+
+policy:
+  allow_threshold: 0.40
+  throttle_threshold: 0.60
+  quarantine_threshold: 0.86
+  terminate_threshold: 0.96
+  token_capacity: 20
+  token_refill_per_s: 6
+  quarantine_ttl_s: 300
+  # Safety default: write firewall intent to the audit log, do not mutate the
+  # host firewall. Set true only after reading docs/FIREWALL.md.
+  enable_os_firewall: false
+  firewall_backend: audit
+
+data:
+  source: synthetic
+  synthetic_events: 12000
+  max_events: 150000
+  negative_ratio: 3.0
+  transactions_csv: data/train_transaction.csv
+  identity_csv: data/train_identity.csv

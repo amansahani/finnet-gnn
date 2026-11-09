@@ -1,0 +1,25 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+
+# Datasets and model artefacts
+data/*.csv
+data/*.zip
+data/*.parquet
+artifacts/*.pt
+artifacts/*.pth
+artifacts/*.npz
+artifacts/*.jsonl
+artifacts/*.json
+artifacts/*.log
+!artifacts/.gitkeep
+
+.DS_Store
+.env
