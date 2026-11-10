@@ -26,6 +26,18 @@ class ServerConfig:
     inline_inference: bool = True
     request_timeout_s: float = 1.0
     use_uvloop: bool = True
+    # Optional TLS/mTLS termination. Disabled by default so loopback demos remain
+    # simple; must be enabled for production socket exposure.
+    tls_enabled: bool = False
+    tls_cert_file: str = ""
+    tls_key_file: str = ""
+    tls_ca_file: str = ""
+    require_client_certificate: bool = False
+    mac_required: bool = False
+    mac_secret_file: str = ""
+    mac_secret: str = ""
+    replay_protection: bool = True
+    idempotency_ttl_s: float = 300.0
     # Test-harness only: allow ISO private field 61 to claim a source subnet
     # when loopback aliases are unavailable. Never enable in production.
     trust_client_subnet: bool = False
@@ -57,6 +69,7 @@ class ModelConfig:
     torch_threads: int = 1
     inference_budget_ms: float = 20.0
     checkpoint: str = "artifacts/risk_gnn.pt"
+    cascade_checkpoint: str = ""
     device: str = "cpu"
 
 
@@ -85,12 +98,17 @@ class TelemetryConfig:
 @dataclass(frozen=True)
 class PolicyConfig:
     allow_threshold: float = 0.40
+    step_up_threshold: float = 0.45
+    review_threshold: float = 0.55
     throttle_threshold: float = 0.60
+    soft_decline_threshold: float = 0.78
     quarantine_threshold: float = 0.86
     terminate_threshold: float = 0.96
     token_capacity: float = 20.0
     token_refill_per_s: float = 6.0
     throttle_penalty_ms: float = 40.0
+    step_up_penalty_ms: float = 5.0
+    review_penalty_ms: float = 5.0
     quarantine_ttl_s: float = 300.0
     violation_window_s: float = 60.0
     violations_to_quarantine: int = 4

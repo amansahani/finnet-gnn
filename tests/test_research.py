@@ -65,6 +65,6 @@ def test_baseline_smoke_with_risk_gate_and_time_encoding(tmp_path) -> None:
         model_path=tmp_path / "missing.pt",
         train_epochs=1,
     )
-    assert report["feature_count"] == 51
+    assert report["feature_count"] == 57
     assert report["baselines"]["logistic"]["available"] is True
     assert report["baselines"]["gnn"]["available"] is True

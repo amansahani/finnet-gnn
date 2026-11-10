@@ -90,6 +90,16 @@ def _build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--firewall-backend", choices=["audit", "pf", "iptables"], default=None)
     serve.add_argument("--calibrator", default=None, help="Path to JSON calibrator written by `finnet calibrate`")
     serve.add_argument("--shadow-mode", action="store_true", help="Compute actions but force ALLOW responses")
+    serve.add_argument("--cascade-model", default=None, help="Optional larger nearline cascade checkpoint")
+    serve.add_argument("--tls-enabled", action="store_true")
+    serve.add_argument("--tls-cert-file", default=None)
+    serve.add_argument("--tls-key-file", default=None)
+    serve.add_argument("--tls-ca-file", default=None)
+    serve.add_argument("--require-client-certificate", action="store_true")
+    serve.add_argument("--mac-required", action="store_true")
+    serve.add_argument("--mac-secret-file", default=None)
+    serve.add_argument("--mac-secret", default=None)
+    serve.add_argument("--disable-replay-protection", action="store_true")
     serve.set_defaults(func=_cmd_serve)
 
     simulate = sub.add_parser("simulate", help="Send legitimate and attack traffic")
@@ -144,6 +154,8 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=["temporal", "card-holdout", "device-holdout", "merchant-holdout"],
         default="temporal",
     )
+    baseline.add_argument("--bootstrap", action="store_true")
+    baseline.add_argument("--bootstrap-iterations", type=int, default=500)
     baseline.add_argument("--model", default=None)
     baseline.add_argument("--train-epochs", type=int, default=None)
     baseline.add_argument(
@@ -289,6 +301,26 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         sections.setdefault("policy", {})["calibration_path"] = args.calibrator
     if args.shadow_mode:
         sections.setdefault("policy", {})["shadow_mode"] = True
+    if args.cascade_model:
+        sections.setdefault("model", {})["cascade_checkpoint"] = args.cascade_model
+    if args.tls_enabled:
+        sections.setdefault("server", {})["tls_enabled"] = True
+    if args.tls_cert_file:
+        sections.setdefault("server", {})["tls_cert_file"] = args.tls_cert_file
+    if args.tls_key_file:
+        sections.setdefault("server", {})["tls_key_file"] = args.tls_key_file
+    if args.tls_ca_file:
+        sections.setdefault("server", {})["tls_ca_file"] = args.tls_ca_file
+    if args.require_client_certificate:
+        sections.setdefault("server", {})["require_client_certificate"] = True
+    if args.mac_required:
+        sections.setdefault("server", {})["mac_required"] = True
+    if args.mac_secret_file:
+        sections.setdefault("server", {})["mac_secret_file"] = args.mac_secret_file
+    if args.mac_secret:
+        sections.setdefault("server", {})["mac_secret"] = args.mac_secret
+    if args.disable_replay_protection:
+        sections.setdefault("server", {})["replay_protection"] = False
     if args.no_uvloop:
         sections.setdefault("server", {})["use_uvloop"] = False
     if args.trust_client_subnet:
@@ -363,6 +395,8 @@ def _cmd_baseline(args: argparse.Namespace) -> int:
         false_positive_cost=args.false_positive_cost,
         false_negative_cost=args.false_negative_cost,
         protocol=args.protocol,
+        include_uncertainty=args.bootstrap,
+        bootstrap_iterations=args.bootstrap_iterations,
     )
     compact = _baseline_summary(report)
     print(json.dumps(compact, indent=2))
@@ -385,9 +419,14 @@ def _baseline_summary(report: dict[str, Any]) -> dict[str, Any]:
                 "average_precision",
                 "precision_at_0.5",
                 "recall_at_0.5",
+                "dollar_recall_at_0.5",
+                "fraud_amount_caught_at_0.5",
+                "fraud_amount_missed_at_0.5",
                 "expected_cost_at_0.5",
             )
         }
+        if "confidence_intervals" in raw:
+            summary[name]["confidence_intervals"] = raw["confidence_intervals"]
         if "calibrated" in payload:
             calibrated = payload["calibrated"]
             summary[name]["calibrated_average_precision"] = calibrated.get("average_precision")

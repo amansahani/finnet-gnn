@@ -99,3 +99,16 @@ def test_client_network_claim() -> None:
     src_ip, subnet = client_network_claim(message)
     assert src_ip == "127.100.1.22"
     assert subnet == "127.100.1.0/24"
+
+
+def test_codec_random_bytes_do_not_crash_uncontrolled() -> None:
+    import random
+
+    random_codec = ISO8583Codec()
+    rng = random.Random(1234)
+    for _ in range(1_000):
+        payload = bytes(rng.randrange(256) for _ in range(rng.randrange(0, 256)))
+        try:
+            random_codec.decode(payload)
+        except ISO8583Error:
+            pass

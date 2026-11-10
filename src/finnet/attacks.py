@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import math
 import random
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+
+import numpy as np
 
 from .config import AppConfig
 from .data.common import TransactionEvent
@@ -47,6 +50,19 @@ def apply_attack(events: list[TransactionEvent], attack: str, *, seed: int = 97)
     return transform(list(events), random.Random(seed))
 
 
+
+def _sample_amounts(samples):
+    from .features import feature_index
+
+    amount_index = feature_index("amount_log")
+    return np.asarray(
+        [
+            max(0.0, math.expm1(float(sample.snapshot.x[sample.snapshot.target_index, amount_index])))
+            for sample in samples
+        ],
+        dtype=float,
+    )
+
 def evaluate_adversarial(
     events: list[TransactionEvent],
     config: AppConfig,
@@ -70,12 +86,14 @@ def evaluate_adversarial(
         "attacks": {},
     }
     baseline_test, _, _, _ = _prepare_phase(test_events, train_events, config)
+    baseline_amounts = _sample_amounts(baseline_test.samples)
     baseline_probabilities, baseline_labels = evaluate_model(
         model, baseline_test, batch_size=256, device=config.model.device
     )
     report["baseline"] = evaluate_scores(
         baseline_labels,
         baseline_probabilities,
+        amounts=baseline_amounts,
         false_positive_cost=config.policy.cost_false_positive,
         false_negative_cost=config.policy.cost_false_negative,
     )
@@ -83,12 +101,14 @@ def evaluate_adversarial(
     for attack in attacks:
         mutated = apply_attack(test_events, attack, seed=config.data.rejection_seed)
         phase, _, _, _ = _prepare_phase(mutated, train_events, config)
+        attack_amounts = _sample_amounts(phase.samples)
         probabilities, labels = evaluate_model(
             model, phase, batch_size=256, device=config.model.device
         )
         metrics = evaluate_scores(
             labels,
             probabilities,
+            amounts=attack_amounts,
             false_positive_cost=config.policy.cost_false_positive,
             false_negative_cost=config.policy.cost_false_negative,
         )

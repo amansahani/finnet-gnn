@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Iterable
 from pathlib import Path
@@ -20,6 +21,7 @@ from .evaluation import (
     flatten_snapshot_features,
     predict_proba,
 )
+from .features import feature_index
 from .model import load_model_checkpoint
 from .training import (
     evaluate_model,
@@ -40,6 +42,26 @@ def _stack_features(samples) -> tuple[np.ndarray, np.ndarray]:
     )
     y = np.asarray([sample.label for sample in samples], dtype=int)
     return x, y
+
+
+def _stack_amounts(samples) -> np.ndarray:
+    amount_index = feature_index("amount_log")
+    return np.asarray(
+        [
+            max(
+                0.0,
+                math.expm1(
+                    float(
+                        sample.snapshot.x[
+                            sample.snapshot.target_index, amount_index
+                        ]
+                    )
+                ),
+            )
+            for sample in samples
+        ],
+        dtype=float,
+    )
 
 
 def _score_sets(x_train: np.ndarray, x_test: np.ndarray, model) -> tuple[np.ndarray, np.ndarray]:
@@ -64,6 +86,8 @@ def run_baseline_benchmark(
     false_positive_cost: float = 1.0,
     false_negative_cost: float = 10.0,
     seed: int = 42,
+    include_uncertainty: bool = True,
+    bootstrap_iterations: int = 500,
 ) -> dict[str, object]:
     started = time.perf_counter()
     protocol_splitters = {
@@ -77,7 +101,9 @@ def run_baseline_benchmark(
     if len(train_samples) == 0 or len(test_samples) == 0:
         raise ValueError("benchmark requires non-empty train/test snapshot sets")
     x_train, y_train = _stack_features(train_samples.samples)
+    train_amounts = _stack_amounts(train_samples.samples)
     x_test, y_test = _stack_features(test_samples.samples)
+    test_amounts = _stack_amounts(test_samples.samples)
     requested = tuple(baselines or available_baselines().keys())
     availability = available_baselines()
     results: dict[str, object] = {}
@@ -92,8 +118,12 @@ def run_baseline_benchmark(
         raw = evaluate_scores(
             y_test,
             test_scores,
+            amounts=test_amounts,
             false_positive_cost=false_positive_cost,
             false_negative_cost=false_negative_cost,
+            include_uncertainty=include_uncertainty,
+            bootstrap_iterations=bootstrap_iterations,
+            seed=seed,
         )
         entry: dict[str, object] = {"available": True, "raw": raw}
         if calibration_method != "none":
@@ -104,12 +134,13 @@ def run_baseline_benchmark(
                 "method": calibration_method,
                 "ece_train_before": raw["calibration"]["ece"],  # type: ignore[index]
                 "ece_train_after": float(
-                    evaluate_scores(y_train, calibrated_train)["calibration"]["ece"]  # type: ignore[index]
+                    evaluate_scores(y_train, calibrated_train, amounts=train_amounts)["calibration"]["ece"]  # type: ignore[index]
                 ),
             }
             entry["calibrated"] = evaluate_scores(
                 y_test,
                 calibrated_test,
+                amounts=test_amounts,
                 false_positive_cost=false_positive_cost,
                 false_negative_cost=false_negative_cost,
             )
@@ -140,8 +171,12 @@ def run_baseline_benchmark(
         gnn_raw = evaluate_scores(
             gnn_labels,
             gnn_probabilities,
+            amounts=test_amounts,
             false_positive_cost=false_positive_cost,
             false_negative_cost=false_negative_cost,
+            include_uncertainty=include_uncertainty,
+            bootstrap_iterations=bootstrap_iterations,
+            seed=seed,
         )
         results["gnn"] = {"available": True, "checkpoint": str(checkpoint), "raw": gnn_raw}
         if calibration_method != "none":
@@ -179,6 +214,7 @@ def run_baseline_benchmark(
             results["gnn"]["calibrated"] = evaluate_scores(
                 gnn_labels,
                 calibrated_gnn,
+                amounts=test_amounts,
                 false_positive_cost=false_positive_cost,
                 false_negative_cost=false_negative_cost,
             )

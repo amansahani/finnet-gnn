@@ -26,7 +26,9 @@ from .iso8583 import (
 )
 from .metrics import Metrics
 from .policy import Action, PolicyDecision, PolicyEngine
+from .risk_cascade import RiskCascade
 from .scorer import RiskScorer, heuristic_score
+from .security import ReplayGuard, message_fingerprint
 from .telemetry import FlowTelemetry
 
 
@@ -47,6 +49,7 @@ class EngineResult:
     raw_score: float | None = None
     calibrated_score: float | None = None
     shadow_action: str = ""
+    idempotent_replay: bool = False
     features: dict[str, float] | None = None
     tx_node_id: int | None = None
     snapshot: GraphSnapshot | None = None
@@ -66,6 +69,7 @@ class EngineResult:
             "raw_score": round(self.raw_score, 6) if self.raw_score is not None else round(self.score, 6),
             "calibrated_score": round(self.calibrated_score, 6) if self.calibrated_score is not None else None,
             "shadow_action": self.shadow_action,
+            "idempotent_replay": self.idempotent_replay,
             "score_source": self.score_source,
             "action": self.action.value,
             "reason": self.reason,
@@ -82,7 +86,11 @@ class GatewayEngine:
         self.config = config
         self.graph = DynamicTransactionGraph(config.graph)
         self.telemetry = FlowTelemetry(config.telemetry)
-        self.scorer = RiskScorer(config.model, config.model.checkpoint)
+        self.scorer = (
+            RiskCascade(config.model)
+            if config.model.cascade_checkpoint
+            else RiskScorer(config.model, config.model.checkpoint)
+        )
         self.policy = PolicyEngine(config.policy)
         self.metrics = Metrics()
         self.calibrator: Calibrator | None = None
@@ -97,6 +105,7 @@ class GatewayEngine:
             max_workers=max(1, config.server.worker_threads),
             thread_name_prefix="finnet-infer",
         )
+        self.replay_guard = ReplayGuard(config.server.idempotency_ttl_s)
         self._sequence = itertools.count(1)
         self._log_lock = threading.Lock()
         self._log_path = Path(config.log_path)
@@ -175,7 +184,9 @@ class GatewayEngine:
         return {
             "uptime_s": time.time() - self.started_at,
             "model_loaded": self.scorer.model_loaded,
-            "model_source": "gnn" if self.scorer.model_loaded else "heuristic",
+            "model_source": "cascade" if getattr(self.scorer, "cascade_path", "") == "cascade" else ("gnn" if getattr(self.scorer, "model_loaded", False) else "heuristic"),
+            "cascade_configured": bool(self.config.model.cascade_checkpoint),
+            "cascade_path": getattr(self.scorer, "cascade_path", ""),
             "model_load_error": self.scorer.load_error,
             "calibrated": self.calibrator is not None,
             "calibration_error": self.calibration_error,
@@ -214,6 +225,13 @@ class GatewayEngine:
         raw_payload: bytes,
         started: float,
     ) -> EngineResult:
+        replay_key = None
+        if self.config.server.replay_protection:
+            replay_key = message_fingerprint(message.fields)
+            cached = self.replay_guard.check(replay_key)
+            if cached is not None:
+                self.metrics.inc("finnet_idempotent_replays_total")
+                return self._replay_result(cached, started=started)
         now = time.time()
         rtt_ms = likely_rtt_ms(message.client_timestamp_ms, now * 1000.0)
         effective_ip, _ = self._effective_network(message, peer_ip)
@@ -272,7 +290,7 @@ class GatewayEngine:
             )
         latency = (time.perf_counter() - started) * 1000.0
         features = self.graph.feature_vector(snapshot)
-        return EngineResult(
+        result = EngineResult(
             action=decision.action,
             score=calibrated_score,
             reason=decision.reason,
@@ -293,6 +311,9 @@ class GatewayEngine:
             snapshot=snapshot,
             error=score_result.error,
         )
+        if replay_key is not None:
+            self.replay_guard.remember(replay_key, self._serialize_replay(result))
+        return result
 
     def _effective_network(
         self, message: ISO8583Message, peer_ip: str
@@ -302,6 +323,43 @@ class GatewayEngine:
             if src_ip:
                 return src_ip, subnet
         return peer_ip, subnet_for_ip(peer_ip)
+
+    def _serialize_replay(self, result: EngineResult) -> str:
+        return json.dumps(
+            {
+                "action": result.action.value,
+                "score": result.score,
+                "reason": result.reason,
+                "response_code": result.response_code,
+                "delay_ms": result.delay_ms,
+                "close_socket": result.close_socket,
+                "send_response": result.send_response,
+            },
+            sort_keys=True,
+        )
+
+    def _replay_result(self, cached: str, *, started: float) -> EngineResult:
+        try:
+            payload = json.loads(cached)
+            action = Action(payload["action"])
+        except Exception:  # noqa: BLE001 - stale cache must degrade to a safe allow
+            action = Action.ALLOW
+            payload = {}
+        return EngineResult(
+            action=action,
+            score=float(payload.get("score", 0.0)),
+            reason=str(payload.get("reason", "idempotent replay")),
+            response_code=str(payload.get("response_code", "00")),
+            delay_ms=0.0,
+            close_socket=bool(payload.get("close_socket", False)),
+            send_response=bool(payload.get("send_response", True)),
+            latency_ms=(time.perf_counter() - started) * 1000.0,
+            score_source="idempotent_replay",
+            within_budget=True,
+            idempotent_replay=True,
+            features={},
+            error="",
+        )
 
     def _precheck_result(self, decision: PolicyDecision, subnet: str) -> EngineResult:
         return EngineResult(

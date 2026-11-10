@@ -78,12 +78,16 @@ Design and evaluate a gateway that:
 - A bounded dynamic multipartite graph with fan-out counters and inductive
   2-hop snapshot export.
 - A relational GraphSAGE model with relation embeddings, edge weights, optional
-  risk-gated message passing and transaction-time Time2Vec encoding.
+  risk-gated message passing and transaction-time Time2Vec encoding, plus an
+  optional in-process fast/nearline cascade.
 - A reproducible classical-vs-GNN evaluation harness with LightGBM, XGBoost,
-  CatBoost, average precision, review-budget recall, expected cost and ECE.
+  CatBoost, average precision, dollar recall, review-budget recall, expected
+  cost, ECE, uncertainty intervals and paper-friendly protocol splits.
 - A closed-loop policy engine with token buckets, TTL quarantine, socket
   teardown, optional isotonic/Platt/temperature calibration, shadow mode and an
   audited firewall adapter.
+- Incremental graph communities for ring-scale features, optional TLS/mTLS,
+  sidecar MAC validation and bounded replay/idempotency protection.
 - A reproducible synthetic benchmark, a temporal training protocol, and an
   IEEE-CIS adapter with an explicit honesty boundary.
 
@@ -281,12 +285,13 @@ fact that network fields are derived.
 
 ### 5.4 Metrics
 
-Primary: Average Precision/PR-AUC, Recall@1%/5%/10% review budgets, expected cost
-under FP/FN costs, Brier score and expected calibration error. Secondary:
-ROC-AUC, precision/recall/F1 at 0.5 and at policy bands, confusion matrix,
-per-attack-type recall, policy operating points, and
-latency/budget breaches. Reported results must include temporal and
-entity-held-out splits once IEEE-CIS is available.
+Primary: Average Precision/PR-AUC, dollar recall and dollar loss at fixed alert
+budgets, Recall@1%/5%/10% review budgets, expected cost under FP/FN costs,
+Brier score and expected calibration error. Secondary: ROC-AUC,
+precision/recall/F1 at 0.5 and at policy bands, confusion matrix, per-attack-type
+recall, policy operating points, bootstrap uncertainty, and latency/budget
+breaches. Reported results must include temporal and entity-held-out splits once
+IEEE-CIS is available.
 
 ---
 

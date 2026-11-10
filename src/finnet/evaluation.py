@@ -64,8 +64,64 @@ def flatten_snapshot_features(snapshot) -> np.ndarray:
             np.log1p(node_counts),
             np.log1p(edge_counts),
             np.log1p(pair_counts),
+            _ring_features(snapshot),
         ]
     ).astype(float)
+
+
+def _ring_features(snapshot) -> np.ndarray:
+    ids = snapshot.community_ids
+    if ids is None:
+        return np.zeros(6, dtype=float)
+    entity_mask = snapshot.node_types != 4
+    entity_ids = ids[entity_mask]
+    counts: dict[int, int] = {}
+    for value in entity_ids:
+        if value > 0:
+            counts[int(value)] = counts.get(int(value), 0) + 1
+    if not counts:
+        return np.zeros(6, dtype=float)
+    total = sum(counts.values())
+    distinct = len(counts)
+    largest = max(counts.values())
+
+    target_community = 0
+    for source, target in snapshot.edge_index.T:
+        source, target = int(source), int(target)
+        if source == snapshot.target_index and entity_mask[target]:
+            target_community = int(ids[target])
+            break
+        if target == snapshot.target_index and entity_mask[source]:
+            target_community = int(ids[source])
+            break
+    if target_community <= 0:
+        return np.asarray(
+            [
+                np.log1p(distinct),
+                largest / max(1, total),
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+            ],
+            dtype=float,
+        )
+    members = np.where(ids == target_community)[0]
+    target_size = len(members)
+    max_risk = float(snapshot.x[members, 4].max(initial=0.0))
+    risk_sum = float(snapshot.x[members, 4].sum())
+    blocked = float((snapshot.x[members, 6] > 0).sum())
+    return np.asarray(
+        [
+            np.log1p(distinct),
+            largest / max(1, total),
+            np.log1p(target_size),
+            np.log1p(risk_sum),
+            np.log1p(blocked),
+            np.clip(max_risk, 0.0, 1.0),
+        ],
+        dtype=float,
+    )
 
 
 _NODE_TYPE_PAIRS = tuple(
@@ -172,12 +228,18 @@ def evaluate_scores(
     labels: np.ndarray,
     scores: np.ndarray,
     *,
+    amounts: np.ndarray | None = None,
     false_positive_cost: float = 1.0,
     false_negative_cost: float = 10.0,
     review_fractions: Iterable[float] = (0.01, 0.05, 0.10),
+    include_uncertainty: bool = False,
+    bootstrap_iterations: int = 500,
+    seed: int = 42,
 ) -> dict[str, object]:
     labels = np.asarray(labels, dtype=int)
     scores = np.asarray(scores, dtype=float)
+    amounts = np.asarray(amounts, dtype=float) if amounts is not None else np.ones(len(labels), dtype=float)
+    fraud_dollar_total = float(amounts[labels == 1].sum())
     predictions = (scores >= 0.5).astype(int)
     result: dict[str, object] = {
         "samples": len(labels),
@@ -188,6 +250,13 @@ def evaluate_scores(
         "log_loss": float(log_loss(labels, np.clip(scores, 1e-7, 1 - 1e-7), labels=[0, 1])),
         "precision_at_0.5": float(precision_score(labels, predictions, zero_division=0)),
         "recall_at_0.5": float(recall_score(labels, predictions, zero_division=0)),
+        "dollar_recall_at_0.5": float(
+            amounts[(labels == 1) & (predictions == 1)].sum() / fraud_dollar_total
+            if fraud_dollar_total > 0
+            else 0.0
+        ),
+        "fraud_amount_caught_at_0.5": float(amounts[(labels == 1) & (predictions == 1)].sum()),
+        "fraud_amount_missed_at_0.5": float(amounts[(labels == 1) & (predictions == 0)].sum()),
         "expected_cost_at_0.5": float(
             false_positive_cost * np.sum((predictions == 1) & (labels == 0))
             + false_negative_cost * np.sum((predictions == 0) & (labels == 1))
@@ -198,28 +267,95 @@ def evaluate_scores(
         ),
         "calibration": calibration_metrics(labels, scores),
     }
+    if include_uncertainty:
+        result["confidence_intervals"] = bootstrap_uncertainty(
+            labels,
+            scores,
+            iterations=bootstrap_iterations,
+            seed=seed,
+        )
     for fraction in review_fractions:
         key = f"top_{int(fraction * 100)}pct"
-        result["review_budget"][key] = recall_at_budget(labels, scores, fraction)
+        result["review_budget"][key] = recall_at_budget(
+            labels, scores, fraction, amounts=amounts
+        )
     return result
 
 
-def recall_at_budget(labels: np.ndarray, scores: np.ndarray, fraction: float) -> dict[str, float]:
+def recall_at_budget(
+    labels: np.ndarray,
+    scores: np.ndarray,
+    fraction: float,
+    *,
+    amounts: np.ndarray | None = None,
+) -> dict[str, float]:
     labels = np.asarray(labels, dtype=int)
     scores = np.asarray(scores, dtype=float)
+    amounts = np.asarray(amounts, dtype=float) if amounts is not None else np.ones(len(labels), dtype=float)
     count = len(labels)
     if count == 0:
-        return {"fraction": float(fraction), "reviewed": 0, "recall": 0.0, "precision": 0.0}
+        return {
+            "fraction": float(fraction),
+            "reviewed": 0,
+            "recall": 0.0,
+            "dollar_recall": 0.0,
+            "precision": 0.0,
+        }
     budget = max(1, round(count * float(fraction)))
     order = np.argsort(-scores)[:budget]
     selected = labels[order]
+    selected_amounts = amounts[order]
     fraud_total = max(1, int(labels.sum()))
+    fraud_amount = float(amounts[labels == 1].sum())
     return {
         "fraction": float(fraction),
         "reviewed": int(budget),
         "recall": float(selected.sum() / fraud_total),
+        "dollar_recall": float(
+            selected_amounts[selected == 1].sum() / fraud_amount if fraud_amount > 0 else 0.0
+        ),
         "precision": float(selected.mean()),
     }
+
+
+def bootstrap_uncertainty(
+    labels: np.ndarray,
+    scores: np.ndarray,
+    *,
+    iterations: int = 500,
+    seed: int = 42,
+) -> dict[str, dict[str, float]]:
+    """Percentile bootstrap intervals for AP and AUC."""
+
+    labels = np.asarray(labels, dtype=int)
+    scores = np.asarray(scores, dtype=float)
+    if len(labels) < 20 or len(np.unique(labels)) < 2:
+        return {
+            "average_precision": {"low": 0.0, "high": 0.0},
+            "auc_roc": {"low": 0.0, "high": 0.0},
+        }
+    rng = np.random.default_rng(seed)
+    values: dict[str, list[float]] = {"average_precision": [], "auc_roc": []}
+    for _ in range(max(1, int(iterations))):
+        indices = rng.integers(0, len(labels), len(labels))
+        sample_labels = labels[indices]
+        if len(np.unique(sample_labels)) < 2:
+            continue
+        sample_scores = scores[indices]
+        values["average_precision"].append(
+            average_precision_score(sample_labels, sample_scores)
+        )
+        values["auc_roc"].append(roc_auc_score(sample_labels, sample_scores))
+
+    def interval(samples: list[float]) -> dict[str, float]:
+        if not samples:
+            return {"low": 0.0, "high": 0.0}
+        return {
+            "low": float(np.quantile(samples, 0.025)),
+            "high": float(np.quantile(samples, 0.975)),
+        }
+
+    return {name: interval(samples) for name, samples in values.items()}
 
 
 def _cost_optimal_threshold(

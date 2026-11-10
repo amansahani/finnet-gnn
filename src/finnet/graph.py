@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from .communities import UnionFind
 from .config import GraphConfig
 from .data.common import TransactionEvent, hour_features
 from .features import (
@@ -94,6 +95,7 @@ class GraphSnapshot:
     timestamp: float
     history: np.ndarray | None = None
     history_mask: np.ndarray | None = None
+    community_ids: np.ndarray | None = None
 
     @property
     def num_nodes(self) -> int:
@@ -136,6 +138,7 @@ class DynamicTransactionGraph:
         self._tx_queue: deque[int] = deque()
         self._history: dict[str, deque[HistoryEntry]] = {}
         self._next_id = 0
+        self._communities = UnionFind()
         self._lock = threading.RLock()
         self._adds = 0
 
@@ -298,6 +301,10 @@ class DynamicTransactionGraph:
                 if src
                 else np.zeros((2, 0), dtype=np.int64)
             )
+            community_ids = np.zeros(len(selected), dtype=np.int64)
+            for node_id, index in local.items():
+                if self._nodes[node_id].node_type != NodeType.TRANSACTION:
+                    community_ids[index] = self._communities.find(node_id)
             return GraphSnapshot(
                 x=x,
                 node_types=node_types,
@@ -317,6 +324,7 @@ class DynamicTransactionGraph:
                     if target.tx_meta is not None
                     else np.zeros(HISTORY_LENGTH, dtype=np.float32)
                 ),
+                community_ids=community_ids,
             )
 
     def node_info(self, node_id: int) -> dict[str, object] | None:
@@ -340,10 +348,12 @@ class DynamicTransactionGraph:
             for node in self._nodes.values():
                 by_type[node.node_type.name] += 1
             edges = sum(len(neighbors) for neighbors in self._adj.values()) // 2
+            communities = self._communities.stats()
             return {
                 "nodes": len(self._nodes),
                 "edges": edges,
                 "transactions_retained": len(self._tx_queue),
+                **communities,
                 **{name.lower(): count for name, count in by_type.items()},
             }
 
@@ -374,11 +384,18 @@ class DynamicTransactionGraph:
         self._nodes[node_id] = node
         self._index[(node_type, key)] = node_id
         self._adj[node_id] = {}
+        if node_type != NodeType.TRANSACTION:
+            self._communities.add(node_id)
         return node
 
     def _link_locked(self, a: int, b: int, relation: Relation, at: float) -> None:
         if a == b:
             return
+        if (
+            self._nodes[a].node_type != NodeType.TRANSACTION
+            and self._nodes[b].node_type != NodeType.TRANSACTION
+        ):
+            self._communities.union(a, b)
         for src, dst in ((a, b), (b, a)):
             edge = self._adj[src].get(dst)
             if edge is None:
@@ -565,6 +582,8 @@ class DynamicTransactionGraph:
             return
         node.deleted = True
         self._index.pop((node.node_type, node.key), None)
+        if node.node_type != NodeType.TRANSACTION:
+            self._communities.remove(node_id)
         neighbors = list(self._adj.pop(node_id, {}).keys())
         for neighbor_id in neighbors:
             self._adj.get(neighbor_id, {}).pop(node_id, None)

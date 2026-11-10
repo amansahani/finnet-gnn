@@ -10,6 +10,7 @@ from .config import AppConfig
 from .engine import EngineResult, GatewayEngine
 from .iso8583 import ISO8583Codec, ISO8583Error
 from .metrics import start_metrics_server
+from .security import build_tls_context
 from .upstream import UpstreamISOClient
 
 
@@ -22,6 +23,24 @@ class GatewayServer:
         self._server: asyncio.AbstractServer | None = None
         self._metrics_server: asyncio.AbstractServer | None = None
         self._slots = asyncio.Semaphore(config.server.max_connections)
+        if config.server.tls_enabled:
+            self._tls_context = build_tls_context(
+                cert_file=config.server.tls_cert_file,
+                key_file=config.server.tls_key_file,
+                ca_file=config.server.tls_ca_file,
+                require_client_certificate=config.server.require_client_certificate,
+            )
+        else:
+            self._tls_context = None
+        if config.server.mac_required:
+            from .security import load_mac_secret
+
+            self._mac_secret = load_mac_secret(
+                mac_secret=config.server.mac_secret,
+                mac_secret_file=config.server.mac_secret_file,
+            )
+        else:
+            self._mac_secret = None
         self._active = 0
         self._stop_event = asyncio.Event()
         self._closed = False
@@ -44,6 +63,7 @@ class GatewayServer:
             self.config.server.host,
             self.config.server.port,
             backlog=512,
+            ssl=self._tls_context,
         )
         self._metrics_server = await start_metrics_server(
             self.engine.metrics,
@@ -121,6 +141,14 @@ class GatewayServer:
                 payload = await asyncio.wait_for(
                     reader.readexactly(length), timeout=self.config.server.idle_timeout_s
                 )
+                if self._mac_secret is not None:
+                    from .security import verify_mac
+
+                    mac = verify_mac(payload, self._mac_secret)
+                    if not mac.valid:
+                        self.engine.metrics.inc("finnet_mac_failures_total")
+                        self.engine.metrics.inc("finnet_protocol_errors_total")
+                        return
                 message = self.codec.decode(payload)
             except (asyncio.IncompleteReadError, asyncio.TimeoutError):
                 return

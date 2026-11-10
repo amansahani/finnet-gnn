@@ -238,12 +238,14 @@ Recent graph-fraud research is strongest on **average precision**, temporal spli
 
 Implemented improvements include:
 
-- **Strong structural baselines:** LightGBM/XGBoost/CatBoost see 51 dimensions—24 target features, node-type counts, relation counts and undirected relation endpoint-pair counts.
+- **Strong structural baselines and graph rings:** LightGBM/XGBoost/CatBoost see 57 dimensions—24 target features, node/relation counts, relation endpoint-pair counts, plus connected-component and risk-concentration signals.
 - **Entity-held-out protocols:** `--protocol temporal|card-holdout|device-holdout|merchant-holdout` tests unseen cards, devices or merchants rather than only random entities.
-- **Risk-gated message passing:** `--risk-gate` lets propagated entity risk modulate aggregation instead of being diluted by uniform neighborhoods.
-- **Time2Vec:** `--temporal-encoding` adds learned transaction-time phase encodings; `--temporal-memory` adds a GRU over the last eight raw transaction events for a target history.
+- **Cost-sensitive, explainable decisions:** `STEP_UP`, `REVIEW`, `SOFT_DECLINE`, `THROTTLE`, `QUARANTINE` and `TERMINATE` are distinct actions; evaluation reports dollar recall and dollar loss at fixed alert budgets.
+- **Drift-robust benchmark reporting:** opt-in percentile bootstrap intervals for AP and ROC-AUC (`--bootstrap`).
 - **Reject-inference benchmark:** `--simulate-rejection` censors legacy choices using a synthetic label-free propensity model and trains on approved outcomes with in-sample importance weights. Replace those propensities with logged legacy scores for deployment.
-- **Adversarial robustness:** `finnet attack-eval` evaluates amount noise, merchant/device/subnet rotation, amount splitting and temporal scatter.
+- **Cascade routing:** `--cascade-model` enables a fast/nearline two-tier scorer for uncertain transactions.
+- **Production hardening:** optional TLS/mTLS termination, sidecar HMAC verification hooks, and STAN/RRN idempotency replay protection.
+- **Fraud-ring awareness:** snapshots track incremental communities (graph deletions are approximate by design); baseline features include community size, risk concentration, blocked counts and community density.
 - **Sketch-backed fanout:** `graph.approx_fanout=true` uses HyperLogLog counters to bound memory for high-cardinality attacks; exact sets remain the default.
 
 ```bash
@@ -313,8 +315,10 @@ The synthetic dataset is intentionally separable and is **not** evidence of IEEE
 | GNN score | Action | Network effect | ISO response |
 |---|---|---|---|
 | `< 0.40` | `ALLOW` | Forward/authorise | `00` |
-| `0.40–0.60` | `ALLOW` with observation | normal response | `00` |
-| `0.60–0.86` | `THROTTLE` | token bucket per subnet + delay | `96` |
+| `0.45–0.55` | `STEP_UP` | Authentication required (3DS/customer challenge) | `05` |
+| `0.55–0.60` | `REVIEW` | Route to reviewer; no final authorisation | `05` |
+| `0.60–0.78` | `THROTTLE` | token bucket per subnet + delay | `96` |
+| `0.78–0.86` | `SOFT_DECLINE` | Soft decline; customer may retry later | `05` |
 | `0.86–0.96` | `QUARANTINE` | add CIDR to TTL quarantine; socket close | `05` |
 | `>= 0.96` | `TERMINATE` | immediate socket teardown; firewall intent | none |
 
@@ -323,6 +327,11 @@ The synthetic dataset is intentionally separable and is **not** evidence of IEEE
 - **Quarantine TTL:** 300 s; the in-process table is authoritative.
 - **Firewall:** default backend is `audit`, which writes JSONL intent and never touches the host firewall. Real `pf`/`iptables` mutation is opt-in. See [docs/FIREWALL.md](docs/FIREWALL.md).
 - **Socket teardown:** TERMINATE closes the writer without an ISO response; QUARANTINE sends a decline then closes.
+- **Decision ladder:** `STEP_UP` and `REVIEW` are explicit deferred actions, not silent allows.
+- **Cascade:** set `model.cascade_checkpoint` or pass `--cascade-model` to use a nearline model for uncertain transactions.
+- **TLS/mTLS:** optional `server.tls_*` settings protect the socket; metrics HTTP should remain loopback/private in production.
+- **Replay protection:** STAN/RRN/merchant/amount fingerprint cache drops duplicates within `server.idempotency_ttl_s`.
+- **MAC verification:** optional `server.mac_required` rejects invalid FinNet HMAC trailers before decoding.
 - **Fail policy:** engine errors fail open by default to preserve availability; configure `policy.fail_open_on_timeout: false` for fail-closed deployments.
 
 ---

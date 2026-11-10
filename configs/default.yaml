@@ -6,6 +6,16 @@ server:
   use_uvloop: true
   upstream_host: ""
   upstream_port: 0
+  tls_enabled: false
+  tls_cert_file: ""
+  tls_key_file: ""
+  tls_ca_file: ""
+  require_client_certificate: false
+  mac_required: false
+  mac_secret_file: ""
+  mac_secret: ""
+  replay_protection: true
+  idempotency_ttl_s: 300
 
 model:
   hidden_dim: 64
@@ -20,6 +30,7 @@ model:
   batch_size: 64
   learning_rate: 0.002
   inference_budget_ms: 20.0
+  cascade_checkpoint: ""
 
 graph:
   max_entities: 200000
@@ -31,9 +42,14 @@ graph:
 
 policy:
   allow_threshold: 0.40
+  step_up_threshold: 0.45
+  review_threshold: 0.55
   throttle_threshold: 0.60
+  soft_decline_threshold: 0.78
   quarantine_threshold: 0.86
   terminate_threshold: 0.96
+  step_up_penalty_ms: 5
+  review_penalty_ms: 5
   token_capacity: 20
   token_refill_per_s: 6
   quarantine_ttl_s: 300

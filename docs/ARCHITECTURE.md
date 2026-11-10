@@ -383,9 +383,9 @@ retraining.
 ### 7.5 Parameter count
 
 The default configuration has **23,937** trainable parameters; enabling the
-optional risk gate and Time2Vec in `--risk-gate --temporal-encoding` yields
-25,313 parameters. The model remains small enough for sub-millisecond to
-low-millisecond CPU inference.
+optional risk gate, Time2Vec and in-process cascade modifies the online scorer
+accordingly. The primary path remains small enough for low-millisecond CPU
+inference.
 
 ---
 
@@ -423,7 +423,7 @@ matrix and reports `gradient × value` for the top-k features. This is a local
 linear attribution, useful for analyst review and dissertation examples. It is
 computed off the decision path.
 
-### 8.4 Calibration and shadow mode
+### 8.4 Calibration, shadow mode and cascade routing
 
 `finnet calibrate` fits an isotonic, Platt or temperature calibrator on a train
 split and serializes it as JSON. A gateway started with
@@ -437,6 +437,20 @@ allow/serve response. The original action is preserved in `shadow_action` and th
 audit log so operators can quantify projected enforcement before enabling it.
 Shadow mode does not quarantine or mutate the graph block window.
 
+When `model.cascade_checkpoint` is set, `GatewayEngine` swaps its scorer for
+`RiskCascade`. Confident transactions keep the fast path; ambiguous scores call
+the optional larger model and fuse probabilities. The cascade is in-process and
+bounded by the same 20 ms budget.
+
+### 8.5 TLS, MAC and replay controls
+
+`server.tls_enabled` protects the ISO socket with asyncio TLS termination;
+`require_client_certificate` adds mutual-TLS authentication. Optional
+`server.mac_required` verifies a FinNet sidecar HMAC before ISO decoding.
+`server.replay_protection` returns cached decisions for repeated STAN/RRN/
+merchant/amount fingerprints. These controls are implementation hooks, not a
+PCI-DSS or EMV certification.
+
 ---
 
 ## 9. Policy and closed-loop mitigation
@@ -446,7 +460,10 @@ Shadow mode does not quarantine or mutate the graph block window.
 | Score band | Action | Socket | ISO response | Side effects |
 |---|---|---|---|---|
 | `< 0.40` | `ALLOW` | keep open | `00` | none |
-| `0.60 – 0.86` | `THROTTLE` | keep open | `96` | consume a token; add 40 ms + burst-based delay |
+| `0.45 – 0.55` | `STEP_UP` | keep open | `05` | customer-authentication action; no final authorisation |
+| `0.55 – 0.60` | `REVIEW` | keep open | `05` | analyst review; no final authorisation |
+| `0.60 – 0.78` | `THROTTLE` | keep open | `96` | consume a token; add 40 ms + burst-based delay |
+| `0.78 – 0.86` | `SOFT_DECLINE` | keep open | `05` | decline; customer may retry after later authentication |
 | `0.86 – 0.96` | `QUARANTINE` | send then close | `05` | add CIDR to TTL quarantine; firewall intent |
 | `>= 0.96` | `TERMINATE` | close immediately | none | quarantine + firewall intent |
 

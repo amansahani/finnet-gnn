@@ -15,7 +15,10 @@ from .telemetry import TelemetrySnapshot
 
 class Action(str, Enum):
     ALLOW = "ALLOW"
+    STEP_UP = "STEP_UP"
+    REVIEW = "REVIEW"
     THROTTLE = "THROTTLE"
+    SOFT_DECLINE = "SOFT_DECLINE"
     QUARANTINE = "QUARANTINE"
     TERMINATE = "TERMINATE"
 
@@ -185,6 +188,17 @@ class PolicyEngine:
                 quarantine_cidr=subnet,
             )
 
+        if score >= self.config.soft_decline_threshold:
+            return PolicyDecision(
+                action=Action.SOFT_DECLINE,
+                reason="soft decline; customer may retry after authentication step-up",
+                score=score,
+                response_code="05",
+                delay_ms=0.0,
+                close_socket=False,
+                send_response=True,
+            )
+
         if score >= self.config.throttle_threshold:
             violations = self._record_violation(subnet, at)
             if violations >= self.config.violations_to_quarantine:
@@ -220,6 +234,28 @@ class PolicyEngine:
                 score=score,
                 response_code="96",
                 delay_ms=delay,
+                close_socket=False,
+                send_response=True,
+            )
+
+        if score >= self.config.review_threshold:
+            return PolicyDecision(
+                action=Action.REVIEW,
+                reason="route to analyst review; authorization is deliberately deferred",
+                score=score,
+                response_code="05",
+                delay_ms=self.config.review_penalty_ms,
+                close_socket=False,
+                send_response=True,
+            )
+
+        if score >= self.config.step_up_threshold:
+            return PolicyDecision(
+                action=Action.STEP_UP,
+                reason="customer authentication step-up required before authorisation",
+                score=score,
+                response_code="05",
+                delay_ms=self.config.step_up_penalty_ms,
                 close_socket=False,
                 send_response=True,
             )
