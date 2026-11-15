@@ -11,6 +11,9 @@ import yaml
 
 @dataclass(frozen=True)
 class ServerConfig:
+    # Lab: permissive local defaults. Reference: documented integration build.
+    # Production: refuses unsafe defaults during service startup.
+    profile: str = "lab"
     host: str = "127.0.0.1"
     port: int = 8583
     metrics_host: str = "127.0.0.1"

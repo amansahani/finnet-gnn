@@ -92,6 +92,31 @@ pip install -e ".[dev]"
 finnet demo
 ```
 
+Or build and run the self-contained container:
+
+```bash
+docker build -t finnet-gnn .
+docker run --rm -p 8583:8583 -p 9101:9101 finnet-gnn
+```
+
+The container installs the CPU-only `torch` wheel instead of the dependency set that would otherwise include NVIDIA packages on Linux aarch64.
+
+Health is available at `http://127.0.0.1:9101/healthz`.
+
+### Deployment profiles
+
+`server.profile` selects the startup posture:
+
+- `lab` (default): permissive, local simulator-friendly profile.
+- `reference`: TLS/mTLS, MAC, replay protection and an upstream authorization endpoint are required.
+- `production`: `reference` requirements plus a trained checkpoint and fail-closed policy.
+
+```bash
+finnet validate --config configs/production.example.yaml
+```
+
+`production.example.yaml` intentionally fails until TLS material, the MAC secret, the upstream address, model checkpoint and non-placeholder PAN salt are replaced. Read [docs/PRODUCT.md](docs/PRODUCT.md), [docs/RUNBOOK.md](docs/RUNBOOK.md) and [SECURITY.md](SECURITY.md) before deployment.
+
 This trains a demo checkpoint on synthetic traffic if none exists, starts the gateway on ephemeral ports, launches legitimate + carding + botnet clients, and prints the mitigation report.
 
 Observed demo behaviour (reproducible synthetic run):
@@ -341,6 +366,7 @@ The synthetic dataset is intentionally separable and is **not** evidence of IEEE
 ```text
 finnet-gnn/
 ├── configs/default.yaml
+├── configs/production.example.yaml
 ├── src/finnet/
 │   ├── iso8583.py       # binary codec + framing + PAN tokenisation
 │   ├── telemetry.py     # RTT/jitter/velocity/entropy flow table
@@ -361,12 +387,20 @@ finnet-gnn/
 │       ├── synthetic.py
 │       ├── ieee_cis.py
 │       └── common.py
-├── tests/               # 33 unit/integration tests
+├── deploy/kubernetes/   # reference Kubernetes Deployment + Service
+├── tests/               # unit/integration tests
 ├── docs/
+│   ├── PRODUCT.md
+│   ├── RUNBOOK.md
 │   ├── ARCHITECTURE.md
 │   ├── PROJECT_REPORT.md
 │   ├── FIREWALL.md
 │   └── DATASET.md
+├── Dockerfile
+├── docker-compose.yml
+├── LICENSE
+├── SECURITY.md
+├── CONTRIBUTING.md
 ├── Makefile
 └── pyproject.toml
 ```

@@ -1,0 +1,20 @@
+name: Bug report
+description: Report a reproducible gateway or protocol defect.
+title: "[bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not report vulnerabilities or paste raw card data in a public issue. Use SECURITY.md.
+  - type: textarea
+    attributes:
+      label: Reproduction
+      description: Include the config profile, command, version and expected/actual behavior.
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Redacted frame or trace ID
+      description: PANs and card secrets must be replaced with a placeholder.
+    validations:
+      required: false

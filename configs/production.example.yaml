@@ -1,0 +1,39 @@
+# Production TEMPLATE. The startup gate refuses this file until every secret and
+# endpoint is intentionally replaced. Copy it outside version control, edit it,
+# then run:
+#   finnet validate --config <path>
+server:
+  profile: production
+  host: 0.0.0.0
+  port: 8583
+  metrics_host: 127.0.0.1
+  metrics_port: 9101
+  use_uvloop: true
+  tls_enabled: true
+  tls_cert_file: /run/secrets/finnet_tls.pem
+  tls_key_file: /run/secrets/finnet_tls_key.pem
+  tls_ca_file: /run/secrets/finnet_client_ca.pem
+  require_client_certificate: true
+  mac_required: true
+  mac_secret_file: /run/secrets/finnet_mac_secret
+  replay_protection: true
+  idempotency_ttl_s: 300
+  upstream_host: upstream.example.invalid
+  upstream_port: 9100
+  upstream_timeout_s: 2.0
+  trust_client_subnet: false
+
+model:
+  checkpoint: /models/risk_gnn.pt
+  device: cpu
+  torch_threads: 4
+
+policy:
+  fail_open_on_timeout: false
+  enable_os_firewall: false
+  firewall_backend: audit
+  shadow_mode: false
+  calibration_path: /models/calibrator.json
+
+data:
+  pan_salt: REPLACE_WITH_RANDOM_KMS_SECRET

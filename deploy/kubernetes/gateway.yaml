@@ -1,0 +1,78 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: finnet-gnn
+  labels:
+    app.kubernetes.io/name: finnet-gnn
+    app.kubernetes.io/part-of: finnet
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: finnet-gnn
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: finnet-gnn
+        app.kubernetes.io/part-of: finnet
+    spec:
+      securityContext:
+        fsGroup: 65532
+        runAsNonRoot: true
+      containers:
+        - name: gateway
+          image: finnet-gnn:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: iso8583
+              containerPort: 8583
+            - name: metrics
+              containerPort: 9101
+          command: ["finnet", "serve", "--config", "configs/default.yaml"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: artifacts
+              mountPath: /app/artifacts
+          readinessProbe:
+            tcpSocket:
+              port: 9101
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 9101
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: artifacts
+          emptyDir:
+            sizeLimit: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: finnet-gnn
+  labels:
+    app.kubernetes.io/name: finnet-gnn
+spec:
+  selector:
+    app.kubernetes.io/name: finnet-gnn
+  ports:
+    - name: metrics
+      port: 9101
+      targetPort: 9101
+    - name: iso8583
+      port: 8583
+      targetPort: 8583

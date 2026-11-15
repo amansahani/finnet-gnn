@@ -1,0 +1,14 @@
+services:
+  finnet:
+    build: .
+    ports:
+      - "8583:8583"
+      - "9101:9101"
+    environment:
+      - FINNET_LOG_LEVEL=INFO
+    volumes:
+      - finnet-artifacts:/app/artifacts
+    restart: unless-stopped
+
+volumes:
+  finnet-artifacts:

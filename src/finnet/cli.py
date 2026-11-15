@@ -18,6 +18,7 @@ from .baselines import run_baseline_benchmark
 from .calibration import Calibrator
 from .config import AppConfig, load_config
 from .data.synthetic import event_to_row, generate_synthetic_events
+from .deployment import enforce_runtime_guard
 from .evaluation import evaluate_scores
 from .features import NODE_FEATURE_NAMES
 from .graph import DynamicTransactionGraph
@@ -75,6 +76,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     serve = sub.add_parser("serve", help="Run the gateway")
     _common_config(serve)
+    serve.add_argument("--profile", choices=["lab", "reference", "production"], default=None)
     serve.add_argument("--host", default=None)
     serve.add_argument("--port", type=int, default=None)
     serve.add_argument("--metrics-port", type=int, default=None)
@@ -214,6 +216,10 @@ def _build_parser() -> argparse.ArgumentParser:
     _common_config(info)
     info.add_argument("--model", default=None)
     info.set_defaults(func=_cmd_info)
+
+    validate = sub.add_parser("validate", help="Check a runtime profile for unsafe production settings")
+    _common_config(validate)
+    validate.set_defaults(func=_cmd_validate)
     return parser
 
 
@@ -285,6 +291,8 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     sections: dict[str, Any] = {}
     if args.host:
         sections.setdefault("server", {})["host"] = args.host
+    if args.profile:
+        sections.setdefault("server", {})["profile"] = args.profile
     if args.port is not None:
         sections.setdefault("server", {})["port"] = args.port
     if args.metrics_port is not None:
@@ -326,7 +334,15 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     if args.trust_client_subnet:
         sections.setdefault("server", {})["trust_client_subnet"] = True
     config = _config_from_args(args, **sections)
+    enforce_runtime_guard(config)
     return _run_server(config)
+
+
+def _cmd_validate(args: argparse.Namespace) -> int:
+    config = _config_from_args(args)
+    enforce_runtime_guard(config)
+    print(json.dumps({"status": "ok", "profile": config.server.profile}, indent=2))
+    return 0
 
 
 def _run_server(config: AppConfig) -> int:

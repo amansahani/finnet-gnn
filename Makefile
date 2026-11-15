@@ -23,7 +23,7 @@ BENCH_EVENTS ?= 8000
 
 .DEFAULT_GOAL := help
 .PHONY: help install install-dev test lint train train-upgraded train-ieee serve serve-prod \
-        simulate demo demo-retrain baseline-run attack-eval calibrate benchmark download-data gen-data info report clean distclean
+        simulate demo demo-retrain baseline-run attack-eval calibrate benchmark download-data gen-data info validate docker-build docker-run test-container report clean distclean
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*##"; printf "FinNet-GNN targets:\n\n"} \
@@ -113,6 +113,18 @@ clean: ## Remove caches and generated reports/logs (keeps checkpoints and data)
 	find . -type f -name '*.pyc' -delete
 	rm -f artifacts/decisions.jsonl artifacts/firewall.jsonl \
 	      artifacts/sim_report.json artifacts/benchmark.json
+
+docker-build: ## Build the container image
+	docker build -t finnet-gnn .
+
+docker-run: ## Run the container in the safe lab profile
+	docker run --rm -p 8583:8583 -p 9101:9101 finnet-gnn
+
+validate: ## Validate the default config and production profile semantics
+	$(FINNET) validate --config $(CONFIG)
+
+test-container: docker-build ## Build and validate the container image
+	docker run --rm finnet-gnn validate --config configs/default.yaml
 
 distclean: clean ## Also remove trained checkpoints, scores and generated data
 	rm -f artifacts/*.pt artifacts/*.npz artifacts/*.report.json
